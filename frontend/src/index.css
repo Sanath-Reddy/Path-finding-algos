@@ -1,0 +1,166 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: #0a0f1a;
+    color: #e2e8f0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ========== SCROLLBAR ========== */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+
+/* ========== GLASSMORPHISM ========== */
+.glass {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.glass-light {
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ========== MAP BACKGROUND ========== */
+.map-bg {
+  background-color: #0a0f1a;
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(34, 197, 94, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(59, 130, 246, 0.03) 0%, transparent 50%);
+}
+
+/* ========== SVG ANIMATIONS ========== */
+@keyframes radar-ping {
+  0% { r: 10; opacity: 0.8; }
+  100% { r: 28; opacity: 0; }
+}
+
+.radar-ping {
+  animation: radar-ping 1.8s infinite ease-out;
+}
+
+@keyframes emergency-pulse {
+  0%, 100% { opacity: 0.6; r: 8; }
+  50% { opacity: 1; r: 12; }
+}
+
+.emergency-pulse {
+  animation: emergency-pulse 1.2s infinite ease-in-out;
+}
+
+/* Ambulance beacon flash */
+@keyframes beacon-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.beacon-flash {
+  animation: beacon-flash 0.6s infinite;
+}
+
+/* Path drawing animation */
+@keyframes dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+
+.path-flow {
+  animation: dash-flow 1s linear infinite;
+}
+
+/* Traffic edge pulse */
+@keyframes traffic-throb {
+  0%, 100% { opacity: 0.7; stroke-width: 3; }
+  50% { opacity: 1; stroke-width: 5; }
+}
+
+.traffic-throb {
+  animation: traffic-throb 1.2s infinite ease-in-out;
+}
+
+/* Floating card entrance */
+@keyframes float-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.float-up {
+  animation: float-up 0.3s ease-out;
+}
+
+/* Status badge blink */
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-blink {
+  animation: status-blink 2s infinite;
+}
+
+/* Smooth slide in from right */
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.slide-in-right {
+  animation: slide-in-right 0.35s ease-out;
+}
+
+/* Winner confetti shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.08) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
+}
+
+/* Button hover lift */
+.btn-lift {
+  transition: all 0.2s ease;
+}
+
+.btn-lift:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.btn-lift:active {
+  transform: translateY(0);
+}
+
+/* Tooltip fade */
+@keyframes tooltip-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.tooltip-in {
+  animation: tooltip-in 0.15s ease-out;
+}
