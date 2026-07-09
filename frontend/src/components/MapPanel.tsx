@@ -1,28 +1,30 @@
 import React, { useState, useRef, useEffect } from "react";
 import { GraphData, VehicleTelemetry, Hospital, ActiveEmergency, Ambulance } from "../types";
 
-export type FilterMode = "all" | "dijkstra" | "astar";
-
 interface MapPanelProps {
   graph:          GraphData;
   vehA:           VehicleTelemetry | null;   // Dijkstra – Blue
   vehB:           VehicleTelemetry | null;   // A*        – Green
+  vehC:           VehicleTelemetry | null;   // Greedy BFS – Orange
+  vehD:           VehicleTelemetry | null;   // Bellman-Ford – Purple
   hospitals:      Hospital[];
   ambulances:     Ambulance[];
   emergency:      ActiveEmergency | null;
   selectedHospId: string | null;             // highlight the chosen hospital
   onNodeClick:    (nodeId: string) => void;
   step:           string;
-  filterMode?:    FilterMode;                // default "all"
+  activeAlgos:    Set<string>;
 }
 
 export const MapPanel: React.FC<MapPanelProps> = ({
-  graph, vehA, vehB, hospitals, ambulances,
+  graph, vehA, vehB, vehC, vehD, hospitals, ambulances,
   emergency, selectedHospId, onNodeClick, step,
-  filterMode = "all"
+  activeAlgos
 }) => {
-  const showA = filterMode !== "astar";
-  const showB = filterMode !== "dijkstra";
+  const showA = activeAlgos.has("A");
+  const showB = activeAlgos.has("B");
+  const showC = activeAlgos.has("C");
+  const showD = activeAlgos.has("D");
   const [vp,  setVp]  = useState({ x:0, y:0, scale:1.0 });
   const [hov, setHov] = useState<string | null>(null);
 
@@ -63,6 +65,25 @@ export const MapPanel: React.FC<MapPanelProps> = ({
     return () => el.removeEventListener("wheel", stop);
   }, []);
 
+  useEffect(() => {
+    const el = mapRef.current;
+    if (!el) return;
+    const fitViewport = () => {
+      const { width, height } = el.getBoundingClientRect();
+      if (width === 0 || height === 0) return;
+      const scaleX = width / svgW;
+      const scaleY = height / svgH;
+      const scale = Math.min(scaleX, scaleY) * 1.05;
+      const x = (width - svgW * scale) / 2;
+      const y = (height - svgH * scale) / 2;
+      setVp({ x, y, scale });
+    };
+    fitViewport();
+    const ro = new ResizeObserver(fitViewport);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [svgW, svgH]);
+
   /* ── build path points string ──────────────────────────────────────── */
   const pts = (veh: VehicleTelemetry | null): string | null => {
     if (!veh || veh.status === "ARRIVED") return null;
@@ -87,14 +108,13 @@ export const MapPanel: React.FC<MapPanelProps> = ({
                userSelect:"none" }}>
 
       <svg width="100%" height="100%"
-        viewBox={`0 0 ${svgW} ${svgH}`}
-        preserveAspectRatio="xMidYMid meet">
+        style={{ display: "block", overflow: "hidden" }}>
 
         <defs>
           {/* glow filters */}
-          {(["blue","green","red","cyan","violet"] as const).map(c => {
+          {(["blue","green","red","cyan","violet","orange","purple"] as const).map(c => {
             const cols: Record<string, string> = {
-              blue:"#3b82f6", green:"#22c55e", red:"#ef4444", cyan:"#06b6d4", violet:"#a78bfa"
+              blue:"#3b82f6", green:"#22c55e", red:"#ef4444", cyan:"#06b6d4", violet:"#a78bfa", orange:"#f97316", purple:"#a855f7"
             };
             return (
               <filter key={c} id={`glow-${c}`} x="-80%" y="-80%" width="260%" height="260%">
@@ -165,6 +185,28 @@ export const MapPanel: React.FC<MapPanelProps> = ({
               <polyline points={p} fill="none" stroke="#22c55e" strokeWidth="2.5"
                 strokeLinecap="round" strokeLinejoin="round" opacity=".95"
                 strokeDasharray="12,5" className="dgo"/>
+            </g>
+          ); })()}
+
+          {/* Greedy BFS (Orange) */}
+          {showC && (() => { const p = pts(vehC); if (!p) return null; return (
+            <g filter="url(#glow-orange)">
+              <polyline points={p} fill="none" stroke="#f97316" strokeWidth="7"
+                strokeLinecap="round" strokeLinejoin="round" opacity=".15"/>
+              <polyline points={p} fill="none" stroke="#f97316" strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round" opacity=".95"
+                strokeDasharray="6,4" className="dgo"/>
+            </g>
+          ); })()}
+
+          {/* Bellman-Ford (Purple) */}
+          {showD && (() => { const p = pts(vehD); if (!p) return null; return (
+            <g filter="url(#glow-purple)">
+              <polyline points={p} fill="none" stroke="#a855f7" strokeWidth="7"
+                strokeLinecap="round" strokeLinejoin="round" opacity=".15"/>
+              <polyline points={p} fill="none" stroke="#a855f7" strokeWidth="2"
+                strokeLinecap="round" strokeLinejoin="round" opacity=".95"
+                strokeDasharray="2,3" className="dgo"/>
             </g>
           ); })()}
 
@@ -306,6 +348,40 @@ export const MapPanel: React.FC<MapPanelProps> = ({
                 <line x1="0" y1="-4" x2="0" y2="5" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round"/>
                 <text x="0" y="-20" fill="#86efac" fontSize="8" fontWeight="800"
                   textAnchor="middle" fontFamily="Inter,sans-serif">A*</text>
+              </g>
+            );
+          })()}
+
+          {/* Greedy BFS — Orange */}
+          {showC && vehC && vehC.status !== "ARRIVED" && (() => {
+            const cx = px(vehC.x), cy = py(vehC.y);
+            return (
+              <g transform={`translate(${cx},${cy}) rotate(${vehC.angle})`}>
+                <ellipse cx="0" cy="4" rx="14" ry="5" fill="rgba(0,0,0,.4)"/>
+                <rect x="-14" y="-8" width="28" height="16" rx="4"
+                  fill="url(#ambGrad)" stroke="#f97316" strokeWidth="2.5"/>
+                <rect x="-5" y="-12" width="10" height="4" rx="2" fill="#f97316" className="blk"/>
+                <line x1="-5" y1="0" x2="5" y2="0" stroke="#f97316" strokeWidth="2.5" strokeLinecap="round"/>
+                <line x1="0" y1="-4" x2="0" y2="5" stroke="#f97316" strokeWidth="2.5" strokeLinecap="round"/>
+                <text x="0" y="-20" fill="#fed7aa" fontSize="8" fontWeight="800"
+                  textAnchor="middle" fontFamily="Inter,sans-serif">Greedy BFS</text>
+              </g>
+            );
+          })()}
+
+          {/* Bellman-Ford — Purple */}
+          {showD && vehD && vehD.status !== "ARRIVED" && (() => {
+            const cx = px(vehD.x), cy = py(vehD.y);
+            return (
+              <g transform={`translate(${cx},${cy}) rotate(${vehD.angle})`}>
+                <ellipse cx="0" cy="4" rx="14" ry="5" fill="rgba(0,0,0,.4)"/>
+                <rect x="-14" y="-8" width="28" height="16" rx="4"
+                  fill="url(#ambGrad)" stroke="#a855f7" strokeWidth="2.5"/>
+                <rect x="-5" y="-12" width="10" height="4" rx="2" fill="#a855f7" className="blk"/>
+                <line x1="-5" y1="0" x2="5" y2="0" stroke="#a855f7" strokeWidth="2.5" strokeLinecap="round"/>
+                <line x1="0" y1="-4" x2="0" y2="5" stroke="#a855f7" strokeWidth="2.5" strokeLinecap="round"/>
+                <text x="0" y="-20" fill="#f3e8ff" fontSize="8" fontWeight="800"
+                  textAnchor="middle" fontFamily="Inter,sans-serif">Bellman-Ford</text>
               </g>
             );
           })()}

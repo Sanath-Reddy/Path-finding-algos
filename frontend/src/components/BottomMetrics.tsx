@@ -4,6 +4,9 @@ import { VehicleTelemetry } from "../types";
 interface Props {
   vehA: VehicleTelemetry | null;
   vehB: VehicleTelemetry | null;
+  vehC: VehicleTelemetry | null;
+  vehD: VehicleTelemetry | null;
+  activeAlgos: Set<string>;
 }
 
 const panelStyle: React.CSSProperties = {
@@ -15,17 +18,20 @@ const panelStyle: React.CSSProperties = {
   boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
   color: "#e2e8f0",
   fontFamily: "'Inter', sans-serif",
+  padding: "12px 16px",
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
 };
 
-export const BottomMetrics: React.FC<Props> = ({ vehA, vehB }) => {
-  const aNodes = vehA?.nodes_explored ?? 0;
-  const bNodes = vehB?.nodes_explored ?? 0;
-  const aTime = vehA?.accumulated_cost ?? 0;
-  const bTime = vehB?.accumulated_cost ?? 0;
-  const aRuntime = (vehA as any)?.runtime_ms ?? 0;
-  const bRuntime = (vehB as any)?.runtime_ms ?? 0;
-  const nodesSavedPct = aNodes > 0 ? Math.max(0, ((aNodes - bNodes) / aNodes) * 100) : 0;
-
+export const BottomMetrics: React.FC<Props> = ({
+  vehA,
+  vehB,
+  vehC,
+  vehD,
+  activeAlgos,
+}) => {
   const etaLabel = (veh: VehicleTelemetry | null) => {
     if (!veh) return "–";
     if (veh.status === "ARRIVED") return "✓ Done";
@@ -40,90 +46,87 @@ export const BottomMetrics: React.FC<Props> = ({ vehA, vehB }) => {
     return "Arrived ✓";
   };
 
-  const aheadBy = aTime - bTime;
-
   const MetricCell = ({ label, value, highlight }: { label: string; value: string; highlight?: string }) => (
-    <div style={{ textAlign: "center", minWidth: 52 }}>
-      <div style={{ fontSize: 9, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 3 }}>{label}</div>
-      <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "'JetBrains Mono', 'Courier New', monospace", color: highlight ?? "#f1f5f9" }}>{value}</div>
+    <div style={{ textAlign: "center", minWidth: 48 }}>
+      <div style={{ fontSize: 8, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 800, fontFamily: "'JetBrains Mono', 'Courier New', monospace", color: highlight ?? "#f1f5f9" }}>{value}</div>
     </div>
   );
 
+  const renderCard = (
+    id: string,
+    name: string,
+    color: string,
+    textColor: string,
+    veh: VehicleTelemetry | null
+  ) => {
+    if (!activeAlgos.has(id)) return null;
+
+    const nodes = veh?.nodes_explored ?? 0;
+    const time = veh?.accumulated_cost ?? 0;
+    const runtime = (veh as any)?.runtime_ms ?? 0;
+
+    return (
+      <div
+        key={id}
+        style={{
+          padding: "10px 14px",
+          borderRadius: 12,
+          background: `${color}06`,
+          border: `1px solid ${color}20`,
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          transition: "all 0.3s ease",
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 65 }}>
+          <div
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: color,
+              boxShadow: `0 0 8px ${color}`,
+            }}
+          />
+          <span style={{ fontSize: 9, fontWeight: 800, color: textColor, letterSpacing: "0.08em", textTransform: "uppercase", textAlign: "center" }}>
+            {name}
+          </span>
+          <span style={{ fontSize: 9, color: "#475569", fontWeight: 600 }}>{statusLabel(veh)}</span>
+        </div>
+
+        <div style={{ width: 1, height: 38, background: "rgba(255,255,255,0.07)" }} />
+
+        <div style={{ display: "flex", gap: 12 }}>
+          <MetricCell label="Nodes" value={String(nodes)} />
+          <MetricCell label="Travel" value={`${time.toFixed(1)}m`} />
+          <MetricCell label="Runtime" value={runtime > 0 ? `${runtime.toFixed(1)}ms` : "–"} />
+          <MetricCell label="ETA left" value={etaLabel(veh)} highlight={textColor} />
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div style={{
-      position: "absolute",
-      bottom: 16,
-      left: "50%",
-      transform: "translateX(-50%)",
-      zIndex: 100,
-    }}>
-      <div style={{ ...panelStyle, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-
-        {/* ── DIJKSTRA ── */}
-        <div style={{
-          padding: "10px 14px", borderRadius: 12,
-          background: "rgba(59,130,246,0.06)",
-          border: "1px solid rgba(59,130,246,0.20)",
-          display: "flex", alignItems: "center", gap: 12
-        }}>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-            <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#3b82f6", boxShadow: "0 0 8px #3b82f6" }} />
-            <span style={{ fontSize: 9, fontWeight: 800, color: "#60a5fa", letterSpacing: "0.08em", textTransform: "uppercase" }}>Dijkstra</span>
-            <span style={{ fontSize: 9, color: "#475569", fontWeight: 600 }}>{statusLabel(vehA)}</span>
-          </div>
-
-          <div style={{ width: 1, height: 44, background: "rgba(255,255,255,0.07)" }} />
-
-          <div style={{ display: "flex", gap: 16 }}>
-            <MetricCell label="Nodes" value={String(aNodes)} />
-            <MetricCell label="Travel" value={`${aTime.toFixed(1)}m`} />
-            <MetricCell label="Runtime" value={aRuntime > 0 ? `${aRuntime.toFixed(1)}ms` : "–"} />
-            <MetricCell label="ETA left" value={etaLabel(vehA)} highlight="#60a5fa" />
-          </div>
-        </div>
-
-        {/* ── VS DIVIDER ── */}
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "0 4px" }}>
-          <span style={{ fontSize: 11, fontWeight: 900, color: "#334155" }}>VS</span>
-          {aheadBy > 0.2 && (
-            <span style={{ fontSize: 9, fontWeight: 700, color: "#4ade80", textAlign: "center", whiteSpace: "nowrap" }}>
-              A* +{aheadBy.toFixed(1)}m ahead
-            </span>
-          )}
-          {nodesSavedPct > 0 && (
-            <span style={{
-              fontSize: 9, fontWeight: 700, color: "#4ade80",
-              background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.25)",
-              padding: "2px 6px", borderRadius: 99, whiteSpace: "nowrap"
-            }}>
-              A* {nodesSavedPct.toFixed(0)}% fewer nodes
-            </span>
-          )}
-        </div>
-
-        {/* ── A* ── */}
-        <div style={{
-          padding: "10px 14px", borderRadius: 12,
-          background: "rgba(34,197,94,0.06)",
-          border: "1px solid rgba(34,197,94,0.20)",
-          display: "flex", alignItems: "center", gap: 12
-        }}>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-            <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 8px #22c55e" }} />
-            <span style={{ fontSize: 9, fontWeight: 800, color: "#4ade80", letterSpacing: "0.08em", textTransform: "uppercase" }}>A* Search</span>
-            <span style={{ fontSize: 9, color: "#475569", fontWeight: 600 }}>{statusLabel(vehB)}</span>
-          </div>
-
-          <div style={{ width: 1, height: 44, background: "rgba(255,255,255,0.07)" }} />
-
-          <div style={{ display: "flex", gap: 16 }}>
-            <MetricCell label="Nodes" value={String(bNodes)} />
-            <MetricCell label="Travel" value={`${bTime.toFixed(1)}m`} />
-            <MetricCell label="Runtime" value={bRuntime > 0 ? `${bRuntime.toFixed(1)}ms` : "–"} />
-            <MetricCell label="ETA left" value={etaLabel(vehB)} highlight="#4ade80" />
-          </div>
-        </div>
-
+    <div
+      style={{
+        position: "absolute",
+        bottom: 16,
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 100,
+        width: "90%",
+        maxWidth: 1000,
+        display: "flex",
+        justifyContent: "center",
+      }}
+    >
+      <div style={panelStyle}>
+        {renderCard("A", "Dijkstra", "#3B82F6", "#60a5fa", vehA)}
+        {renderCard("B", "A*", "#22C55E", "#4ade80", vehB)}
+        {renderCard("C", "Greedy BFS", "#F97316", "#fed7aa", vehC)}
+        {renderCard("D", "Bellman-Ford", "#A855F7", "#f3e8ff", vehD)}
       </div>
     </div>
   );

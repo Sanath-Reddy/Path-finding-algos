@@ -3,6 +3,8 @@ import math
 from graph import apply_traffic_events, serialize_graph, update_edge_weights
 from dijkstra import dijkstra, dijkstra_all
 from astar import astar
+from bellman_ford import bellman_ford
+from greedy_bfs import greedy_bfs
 from dispatch import (
     select_ambulance_optimized,
     select_hospital_optimized
@@ -31,6 +33,8 @@ class EOCSimulation:
 
         self.veh_a = None   # Dijkstra vehicle (Blue)
         self.veh_b = None   # A* vehicle (Green)
+        self.veh_c = None   # Greedy BFS vehicle (Orange)
+        self.veh_d = None   # Bellman-Ford vehicle (Purple)
 
         self.logs = []
         self.total_emergencies_resolved = 0
@@ -82,6 +86,8 @@ class EOCSimulation:
         self.active_emergency = None
         self.veh_a = None
         self.veh_b = None
+        self.veh_c = None
+        self.veh_d = None
         self.is_paused = True
         self.logs = [
             {"time": "SYSTEM", "msg": "City loaded. Click any node to create an emergency."}
@@ -151,11 +157,15 @@ class EOCSimulation:
         d_to_h  = dijkstra(self.graph, em_node,    hosp_node)
         a_to_em = astar(   self.graph, start_node, em_node)
         a_to_h  = astar(   self.graph, em_node,    hosp_node)
+        g_to_em = greedy_bfs(self.graph, start_node, em_node)
+        g_to_h  = greedy_bfs(self.graph, em_node,    hosp_node)
+        bf_to_em = bellman_ford(self.graph, start_node, em_node)
+        bf_to_h  = bellman_ford(self.graph, em_node,    hosp_node)
 
-        if not d_to_em["path"] or not a_to_em["path"]:
+        if not d_to_em["path"] or not a_to_em["path"] or not g_to_em["path"] or not bf_to_em["path"]:
             self.add_log("ERROR", "Path not found to emergency.")
             return False
-        if not d_to_h["path"] or not a_to_h["path"]:
+        if not d_to_h["path"] or not a_to_h["path"] or not g_to_h["path"] or not bf_to_h["path"]:
             self.add_log("ERROR", "Path not found to hospital.")
             return False
 
@@ -200,6 +210,44 @@ class EOCSimulation:
             "runtime_ms":         a_to_em["execution_time_ms"] + a_to_h["execution_time_ms"],
         }
 
+        # ── Greedy BFS vehicle (Orange / C) ───────────────────────────
+        self.veh_c = {
+            "id":                 "Greedy BFS (Orange)",
+            "current_node":       start_node,
+            "status":             "RESPONDING",
+            "path_to_emergency":  g_to_em["path"],
+            "path_to_hospital":   g_to_h["path"],
+            "segment_index":      0,
+            "segment_progress":   0.0,
+            "x":                  sx,
+            "y":                  sy,
+            "angle":              0.0,
+            "est_travel_time":    g_to_em["cost"] + g_to_h["cost"],
+            "accumulated_cost":   0.0,
+            "nodes_explored":     g_to_em["nodes_explored"] + g_to_h["nodes_explored"],
+            "route_len":          len(g_to_em["path"]) + len(g_to_h["path"]) - 1,
+            "runtime_ms":         g_to_em["execution_time_ms"] + g_to_h["execution_time_ms"],
+        }
+
+        # ── Bellman-Ford vehicle (Purple / D) ─────────────────────────
+        self.veh_d = {
+            "id":                 "Bellman-Ford (Purple)",
+            "current_node":       start_node,
+            "status":             "RESPONDING",
+            "path_to_emergency":  bf_to_em["path"],
+            "path_to_hospital":   bf_to_h["path"],
+            "segment_index":      0,
+            "segment_progress":   0.0,
+            "x":                  sx,
+            "y":                  sy,
+            "angle":              0.0,
+            "est_travel_time":    bf_to_em["cost"] + bf_to_h["cost"],
+            "accumulated_cost":   0.0,
+            "nodes_explored":     bf_to_em["nodes_explored"] + bf_to_h["nodes_explored"],
+            "route_len":          len(bf_to_em["path"]) + len(bf_to_h["path"]) - 1,
+            "runtime_ms":         bf_to_em["execution_time_ms"] + bf_to_h["execution_time_ms"],
+        }
+
         # Reduce beds at selected hospital
         for h in self.hospitals:
             if h["id"] == opt_hosp["id"]:
@@ -210,29 +258,52 @@ class EOCSimulation:
 
     # ------------------------------------------------------------------
     def recalculate_astar(self):
-        """Re-routes veh_b (A*) from its current position to its current target."""
-        if not self.veh_b or self.veh_b["status"] == "ARRIVED":
-            return
-        if self.veh_b["status"] == "RESPONDING":
-            target = self.active_emergency["node"]
-            res = astar(self.graph, self.veh_b["current_node"], target)
-            if res["path"]:
-                self.veh_b["path_to_emergency"] = res["path"]
-                self.veh_b["segment_index"]     = 0
-                self.veh_b["segment_progress"]  = 0.0
-                self.veh_b["nodes_explored"]   += res["nodes_explored"]
-                self.veh_b["runtime_ms"]       += res["execution_time_ms"]
-        elif self.veh_b["status"] == "TRANSPORTING":
-            dest_str = self.veh_a["path_to_hospital"][-1]
-            px, py = dest_str.split(",")
-            h_tuple = (int(px), int(py))
-            res = astar(self.graph, self.veh_b["current_node"], h_tuple)
-            if res["path"]:
-                self.veh_b["path_to_hospital"] = res["path"]
-                self.veh_b["segment_index"]    = 0
-                self.veh_b["segment_progress"] = 0.0
-                self.veh_b["nodes_explored"]  += res["nodes_explored"]
-                self.veh_b["runtime_ms"]      += res["execution_time_ms"]
+        """Re-routes veh_b (A*) and veh_c (Greedy BFS) from their current position to current target."""
+        # 1. Re-route A*
+        if self.veh_b and self.veh_b["status"] != "ARRIVED":
+            if self.veh_b["status"] == "RESPONDING":
+                target = self.active_emergency["node"]
+                res = astar(self.graph, self.veh_b["current_node"], target)
+                if res["path"]:
+                    self.veh_b["path_to_emergency"] = res["path"]
+                    self.veh_b["segment_index"]     = 0
+                    self.veh_b["segment_progress"]  = 0.0
+                    self.veh_b["nodes_explored"]   += res["nodes_explored"]
+                    self.veh_b["runtime_ms"]       += res["execution_time_ms"]
+            elif self.veh_b["status"] == "TRANSPORTING":
+                dest_str = self.veh_a["path_to_hospital"][-1]
+                px, py = dest_str.split(",")
+                h_tuple = (int(px), int(py))
+                res = astar(self.graph, self.veh_b["current_node"], h_tuple)
+                if res["path"]:
+                    self.veh_b["path_to_hospital"] = res["path"]
+                    self.veh_b["segment_index"]    = 0
+                    self.veh_b["segment_progress"] = 0.0
+                    self.veh_b["nodes_explored"]  += res["nodes_explored"]
+                    self.veh_b["runtime_ms"]      += res["execution_time_ms"]
+
+        # 2. Re-route Greedy BFS
+        if self.veh_c and self.veh_c["status"] != "ARRIVED":
+            if self.veh_c["status"] == "RESPONDING":
+                target = self.active_emergency["node"]
+                res = greedy_bfs(self.graph, self.veh_c["current_node"], target)
+                if res["path"]:
+                    self.veh_c["path_to_emergency"] = res["path"]
+                    self.veh_c["segment_index"]     = 0
+                    self.veh_c["segment_progress"]  = 0.0
+                    self.veh_c["nodes_explored"]   += res["nodes_explored"]
+                    self.veh_c["runtime_ms"]       += res["execution_time_ms"]
+            elif self.veh_c["status"] == "TRANSPORTING":
+                dest_str = self.veh_a["path_to_hospital"][-1]
+                px, py = dest_str.split(",")
+                h_tuple = (int(px), int(py))
+                res = greedy_bfs(self.graph, self.veh_c["current_node"], h_tuple)
+                if res["path"]:
+                    self.veh_c["path_to_hospital"] = res["path"]
+                    self.veh_c["segment_index"]    = 0
+                    self.veh_c["segment_progress"] = 0.0
+                    self.veh_c["nodes_explored"]  += res["nodes_explored"]
+                    self.veh_c["runtime_ms"]      += res["execution_time_ms"]
 
     # ------------------------------------------------------------------
     def add_congestion(self):
@@ -329,11 +400,18 @@ class EOCSimulation:
             self.advance_vehicle(self.veh_a, tick_duration)
         if self.veh_b:
             self.advance_vehicle(self.veh_b, tick_duration)
-        if (
-            self.veh_a and self.veh_b
-            and self.veh_a["status"] == "ARRIVED"
-            and self.veh_b["status"] == "ARRIVED"
-        ):
+        if self.veh_c:
+            self.advance_vehicle(self.veh_c, tick_duration)
+        if self.veh_d:
+            self.advance_vehicle(self.veh_d, tick_duration)
+            
+        all_arrived = True
+        for veh in [self.veh_a, self.veh_b, self.veh_c, self.veh_d]:
+            if veh and veh["status"] != "ARRIVED":
+                all_arrived = False
+                break
+                
+        if all_arrived and self.veh_a:
             self.active_emergency["status"] = "RESOLVED"
             self.add_log("SYSTEM", "✅ Emergency resolved.")
 
@@ -352,6 +430,8 @@ class EOCSimulation:
             } if ae else None,
             "veh_a": self.veh_a,
             "veh_b": self.veh_b,
+            "veh_c": self.veh_c,
+            "veh_d": self.veh_d,
             "logs":  self.logs,
             "global_stats": {
                 "resolved_count":    self.total_emergencies_resolved,

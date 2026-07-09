@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from simulation import EOCSimulation
+from hungarian import build_dispatch_comparison
 
 # Core simulation instance
 simulation = EOCSimulation(width=10, height=10)
@@ -372,6 +373,24 @@ async def demo_block_dijkstra():
     return {"status": "success", "blocked": blocked, "data": simulation.get_telemetry()}
 
 
+
+@app.get("/api/hungarian-demo")
+async def run_hungarian_demo():
+    try:
+        # Generate 4 random emergencies (excluding the nodes where ambulances/hospitals are)
+        exclude_nodes = set(a['current_node'] for a in simulation.ambulances)
+        exclude_nodes.update(h['node'] for h in simulation.hospitals)
+        
+        all_nodes = [node for node in simulation.graph.nodes if node not in exclude_nodes]
+        em_nodes = random.sample(all_nodes, 4)
+        
+        emergencies = [{"node": node} for node in em_nodes]
+        
+        res = build_dispatch_comparison(simulation.ambulances, emergencies, simulation.graph)
+        return {"status": "success", "data": res}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"status": "error", "message": str(e)}
 
 # WebSocket Endpoint
 @app.websocket("/ws")

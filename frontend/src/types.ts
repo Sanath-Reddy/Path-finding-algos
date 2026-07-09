@@ -77,6 +77,8 @@ export interface TelemetryPayload {
   active_emergency: ActiveEmergency | null;
   veh_a: VehicleTelemetry | null; // Dijkstra
   veh_b: VehicleTelemetry | null; // A*
+  veh_c: VehicleTelemetry | null; // Greedy BFS
+  veh_d: VehicleTelemetry | null; // Bellman-Ford
   logs: IncidentLog[];
   global_stats: GlobalStats;
   speed_multiplier: number;
@@ -87,4 +89,16 @@ export interface TrafficAlert {
   road: string;
   dijkstra_eta: number;
   astar_eta: number;
+}
+
+export interface HungarianResult {
+  cost_matrix: number[][];
+  ambulance_ids: string[];
+  emergency_labels: string[];
+  greedy_assignment: number[];
+  greedy_cost: number;
+  hungarian_assignment: number[];
+  hungarian_cost: number;
+  savings_pct: number;
+  execution_time_ms: number;
 }
