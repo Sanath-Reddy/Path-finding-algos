@@ -40,6 +40,17 @@ class EOCSimulation:
         self.total_emergencies_resolved = 0
         self.average_response_time = 0.0
         self.response_times_history = []
+        
+        self.last_hungarian_result = None
+        self.hospital_overflow_count = 0
+        self.disaster_mode = False
+
+        self.mci_mode = False
+        self.mci_emergencies = []
+        self.mci_greedy_vehicles = []
+        self.mci_hungarian_vehicles = []
+        self.mci_greedy_total = 0.0
+        self.mci_hungarian_total = 0.0
 
         self.reset_map()
 
@@ -89,8 +100,46 @@ class EOCSimulation:
         self.veh_c = None
         self.veh_d = None
         self.is_paused = True
+        self.disaster_mode = False
+        self.last_hungarian_result = None
+        self.mci_mode = False
+        self.mci_emergencies = []
+        self.mci_greedy_vehicles = []
+        self.mci_hungarian_vehicles = []
+        self.mci_greedy_total = 0.0
+        self.mci_hungarian_total = 0.0
         self.logs = [
             {"time": "SYSTEM", "msg": "City loaded. Click any node to create an emergency."}
+        ]
+
+    def reset_incident(self):
+        """
+        Clears the active incident and vehicle routes, resetting ambulances to their corners
+        but PRESERVING the graph structure, traffic weights, and hospital bed counts.
+        """
+        W, H = self.width, self.height
+        self.ambulances = [
+            {"id": "AMB-1", "current_node": (0,   0  ), "available": True, "type": "ALS"},
+            {"id": "AMB-2", "current_node": (0,   H-1), "available": True, "type": "BLS"},
+            {"id": "AMB-3", "current_node": (W-1, 0  ), "available": True, "type": "ALS"},
+            {"id": "AMB-4", "current_node": (W-1, H-1), "available": True, "type": "BLS"},
+        ]
+        self.active_emergency = None
+        self.veh_a = None
+        self.veh_b = None
+        self.veh_c = None
+        self.veh_d = None
+        self.is_paused = True
+        self.disaster_mode = False
+        self.last_hungarian_result = None
+        self.mci_mode = False
+        self.mci_emergencies = []
+        self.mci_greedy_vehicles = []
+        self.mci_hungarian_vehicles = []
+        self.mci_greedy_total = 0.0
+        self.mci_hungarian_total = 0.0
+        self.logs = [
+            {"time": "SYSTEM", "msg": "Incident cleared. Preserved hospital bed capacities."}
         ]
 
     # ------------------------------------------------------------------
@@ -116,6 +165,7 @@ class EOCSimulation:
         Creates an emergency, selects best ambulance & hospital,
         computes Dijkstra and A* routes, then starts the simulation.
         """
+        self.reset_incident()
         parts = node_str.split(",")
         em_node = (int(parts[0]), int(parts[1]))
 
@@ -141,6 +191,15 @@ class EOCSimulation:
         opt_hosp, hosp_time = select_hospital_optimized(
             self.hospitals, em_node, self.graph, priority, specialty
         )
+
+        if opt_hosp and opt_hosp.get("beds", 0) == 0:
+            hospitals_with_beds = [h for h in self.hospitals if h.get("beds", 0) > 0]
+            if hospitals_with_beds:
+                self.add_log("OVERFLOW", f"⚠️ {opt_hosp['name']} is FULL! Overflow redirection triggered...")
+                self.hospital_overflow_count += 1
+                opt_hosp, hosp_time = select_hospital_optimized(
+                    hospitals_with_beds, em_node, self.graph, priority, specialty
+                )
 
         if not opt_amb or not opt_hosp:
             self.add_log("ERROR", "Dispatch failed — no reachable resources.")
@@ -248,11 +307,6 @@ class EOCSimulation:
             "runtime_ms":         bf_to_em["execution_time_ms"] + bf_to_h["execution_time_ms"],
         }
 
-        # Reduce beds at selected hospital
-        for h in self.hospitals:
-            if h["id"] == opt_hosp["id"]:
-                h["beds"] = max(0, h["beds"] - 1)
-
         self.is_paused = False
         return True
 
@@ -325,7 +379,26 @@ class EOCSimulation:
     def clear_traffic(self):
         from graph import reset_traffic
         reset_traffic(self.graph)
+        self.disaster_mode = False
         self.add_log("TRAFFIC", "🟢 All traffic cleared.")
+        self.recalculate_astar()
+
+    def trigger_disaster_mode(self):
+        """
+        Simulates a major natural disaster by blocking ~20 % of roads.
+        Sets traffic_factor = float('inf') on these roads.
+        """
+        if not self.graph:
+            return
+        self.disaster_mode = True
+        edges = list(self.graph.edges())
+        # Block 20% of edges randomly
+        n = max(5, int(len(edges) * 0.20))
+        blocked_edges = random.sample(edges, min(n, len(edges)))
+        for u, v in blocked_edges:
+            self.graph[u][v]["traffic_factor"] = float("inf")
+        update_edge_weights(self.graph)
+        self.add_log("DISASTER", "💥 DISASTER MODE ACTIVATED! Major routes blocked across the city.")
         self.recalculate_astar()
 
     def trigger_traffic_surge(self):
@@ -392,9 +465,190 @@ class EOCSimulation:
             veh["segment_progress"] = 0.0
             veh["current_node"]     = v
 
+    def advance_mci_vehicle(self, veh, tick_duration=0.1):
+        if veh["status"] == "ARRIVED":
+            return
+
+        path = veh["path"]
+        if not path or veh["segment_index"] >= len(path) - 1:
+            veh["status"] = "ARRIVED"
+            self.add_log("MCI", f"🏁 {veh['id']} reached assigned emergency.")
+            return
+
+        u_str = path[veh["segment_index"]]
+        v_str = path[veh["segment_index"] + 1]
+        pu = u_str.split(",")
+        pv = v_str.split(",")
+        u = (int(pu[0]), int(pu[1]))
+        v = (int(pv[0]), int(pv[1]))
+
+        ew = self.graph[u][v].get("current_weight", float("inf"))
+        if ew == float("inf") or ew < 0:
+            ew = 12.0   # blocked-road delay
+
+        step = self.speed_multiplier * tick_duration / max(0.01, ew)
+        veh["segment_progress"]  += step
+        veh["accumulated_cost"]  += step * ew
+
+        pos_u = self.graph.nodes[u]["pos"]
+        pos_v = self.graph.nodes[v]["pos"]
+        t = min(1.0, veh["segment_progress"])
+        veh["x"] = round((1 - t) * pos_u[0] + t * pos_v[0], 3)
+        veh["y"] = round((1 - t) * pos_u[1] + t * pos_v[1], 3)
+
+        dx = pos_v[0] - pos_u[0]
+        dy = pos_v[1] - pos_u[1]
+        veh["angle"] = round(math.degrees(math.atan2(dy, dx)), 1)
+
+        if veh["segment_progress"] >= 1.0:
+            veh["segment_index"]    += 1
+            veh["segment_progress"] = 0.0
+            veh["current_node"]     = v
+
+    def trigger_mci(self):
+        """
+        Triggers a Mass Casualty Incident (MCI) Demo with 4 emergencies and 4 ambulances.
+        Solves assignment using both Greedy (nearest first) and Hungarian algorithms,
+        then starts both fleets in parallel.
+        """
+        import random
+        random.seed(400)
+        self.reset_map()
+        self.mci_mode = True
+        
+        W, H = self.width, self.height
+        
+        # 4 predefined emergencies at symmetric interior nodes
+        em_nodes = [(2, 2), (2, H-3), (W-3, 2), (W-3, H-3)]
+        self.mci_emergencies = [f"{n[0]},{n[1]}" for n in em_nodes]
+        
+        # Ensure 4 ambulances are at their base stations
+        self.ambulances = [
+            {"id": "AMB-1", "current_node": (0,   0  ), "available": True, "type": "ALS"},
+            {"id": "AMB-2", "current_node": (0,   H-1), "available": True, "type": "BLS"},
+            {"id": "AMB-3", "current_node": (W-1, 0  ), "available": True, "type": "ALS"},
+            {"id": "AMB-4", "current_node": (W-1, H-1), "available": True, "type": "BLS"},
+        ]
+        
+        # Compute 4x4 cost matrix (ambulance i to emergency j)
+        cost_matrix = []
+        paths_matrix = [] # paths_matrix[i][j] = path from amb i to em j
+        for i, amb in enumerate(self.ambulances):
+            row_costs = []
+            row_paths = []
+            for j, em in enumerate(em_nodes):
+                res = dijkstra(self.graph, amb["current_node"], em)
+                row_costs.append(res["cost"])
+                row_paths.append(res["path"])
+            cost_matrix.append(row_costs)
+            paths_matrix.append(row_paths)
+            
+        # 1. Hungarian assignment
+        from hungarian import hungarian_assign
+        hungarian_assignment, hungarian_cost = hungarian_assign(cost_matrix)
+        
+        # 2. Greedy assignment (loop over emergencies, assign nearest available ambulance)
+        greedy_assignment = [-1] * 4
+        assigned_ambs = set()
+        for j in range(4):
+            best_amb = None
+            min_cost = float('inf')
+            for i in range(4):
+                if i in assigned_ambs:
+                    continue
+                if cost_matrix[i][j] < min_cost:
+                    min_cost = cost_matrix[i][j]
+                    best_amb = i
+            greedy_assignment[best_amb] = j
+            assigned_ambs.add(best_amb)
+            
+        # Store results for display / comparison
+        self.last_hungarian_result = {
+            "cost_matrix": cost_matrix,
+            "ambulance_ids": [a["id"] for a in self.ambulances],
+            "emergency_labels": [f"Patient at {n}" for n in em_nodes],
+            "greedy_assignment": greedy_assignment,
+            "greedy_cost": sum(cost_matrix[i][greedy_assignment[i]] for i in range(4)),
+            "hungarian_assignment": hungarian_assignment,
+            "hungarian_cost": hungarian_cost,
+            "savings_pct": ((sum(cost_matrix[i][greedy_assignment[i]] for i in range(4)) - hungarian_cost) / max(0.1, sum(cost_matrix[i][greedy_assignment[i]] for i in range(4)))) * 100.0,
+            "execution_time_ms": 0.1
+        }
+        
+        # Setup MCI Greedy vehicles (shades of blue / dashed paths visually on front-end)
+        self.mci_greedy_vehicles = []
+        for i, amb in enumerate(self.ambulances):
+            em_idx = greedy_assignment[i]
+            target_node = em_nodes[em_idx]
+            path = paths_matrix[i][em_idx]
+            start_node = amb["current_node"]
+            sx = self.graph.nodes[start_node]["x"]
+            sy = self.graph.nodes[start_node]["y"]
+            self.mci_greedy_vehicles.append({
+                "id": f"{amb['id']} (Greedy)",
+                "color": "#3B82F6",
+                "start_node": f"{start_node[0]},{start_node[1]}",
+                "target_node": f"{target_node[0]},{target_node[1]}",
+                "path": path,
+                "x": sx, "y": sy, "angle": 0.0,
+                "accumulated_cost": 0.0,
+                "segment_index": 0,
+                "segment_progress": 0.0,
+                "status": "RESPONDING"
+            })
+            
+        # Setup MCI Hungarian vehicles (shades of red / solid paths)
+        self.mci_hungarian_vehicles = []
+        for i, amb in enumerate(self.ambulances):
+            em_idx = hungarian_assignment[i]
+            target_node = em_nodes[em_idx]
+            path = paths_matrix[i][em_idx]
+            start_node = amb["current_node"]
+            sx = self.graph.nodes[start_node]["x"]
+            sy = self.graph.nodes[start_node]["y"]
+            self.mci_hungarian_vehicles.append({
+                "id": f"{amb['id']} (Hungarian)",
+                "color": "#ef4444",
+                "start_node": f"{start_node[0]},{start_node[1]}",
+                "target_node": f"{target_node[0]},{target_node[1]}",
+                "path": path,
+                "x": sx, "y": sy, "angle": 0.0,
+                "accumulated_cost": 0.0,
+                "segment_index": 0,
+                "segment_progress": 0.0,
+                "status": "RESPONDING"
+            })
+            
+        self.mci_greedy_total = 0.0
+        self.mci_hungarian_total = 0.0
+        self.is_paused = False
+        self.add_log("MCI", "🚨 MASS CASUALTY INCIDENT declared! Dispatching 4 ambulances.")
+        self.add_log("MCI", "Compare Greedy (Blue) vs optimal Hungarian (Red) fleets.")
+
     # ------------------------------------------------------------------
     def tick(self, tick_duration=0.1):
-        if self.is_paused or not self.active_emergency:
+        if self.is_paused:
+            return
+
+        if self.mci_mode:
+            # Advance all MCI vehicles
+            for veh in self.mci_greedy_vehicles:
+                self.advance_mci_vehicle(veh, tick_duration)
+            for veh in self.mci_hungarian_vehicles:
+                self.advance_mci_vehicle(veh, tick_duration)
+                
+            # Accumulate live stats for display
+            self.mci_greedy_total = sum(v["accumulated_cost"] for v in self.mci_greedy_vehicles)
+            self.mci_hungarian_total = sum(v["accumulated_cost"] for v in self.mci_hungarian_vehicles)
+
+            # Check if all Hungarian vehicles arrived to finish
+            all_arrived = all(v["status"] == "ARRIVED" for v in self.mci_hungarian_vehicles)
+            if all_arrived:
+                self.is_paused = True
+                self.add_log("MCI", "🏁 Mass Casualty Incident dispatch simulation completed.")
+            return
+
+        if not self.active_emergency:
             return
         if self.veh_a:
             self.advance_vehicle(self.veh_a, tick_duration)
@@ -437,7 +691,16 @@ class EOCSimulation:
                 "resolved_count":    self.total_emergencies_resolved,
                 "avg_response_time": self.average_response_time,
                 "history":           self.response_times_history,
+                "hospital_overflow_count": self.hospital_overflow_count,
             },
             "speed_multiplier": self.speed_multiplier,
             "is_paused":        self.is_paused,
+            "last_hungarian_result": self.last_hungarian_result,
+            "disaster_mode":    self.disaster_mode,
+            "mci_mode":         self.mci_mode,
+            "mci_emergencies":  self.mci_emergencies,
+            "mci_greedy_vehicles": self.mci_greedy_vehicles,
+            "mci_hungarian_vehicles": self.mci_hungarian_vehicles,
+            "mci_greedy_total": self.mci_greedy_total,
+            "mci_hungarian_total": self.mci_hungarian_total,
         }

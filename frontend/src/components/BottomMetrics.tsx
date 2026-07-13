@@ -1,5 +1,5 @@
 import React from "react";
-import { VehicleTelemetry } from "../types";
+import { VehicleTelemetry, HungarianResult } from "../types";
 
 interface Props {
   vehA: VehicleTelemetry | null;
@@ -7,6 +7,11 @@ interface Props {
   vehC: VehicleTelemetry | null;
   vehD: VehicleTelemetry | null;
   activeAlgos: Set<string>;
+  hungarianResult?: HungarianResult | null;
+  mciMode?: boolean;
+  mciGreedyTotal?: number;
+  mciHungarianTotal?: number;
+  savingsPct?: number;
 }
 
 const panelStyle: React.CSSProperties = {
@@ -31,6 +36,11 @@ export const BottomMetrics: React.FC<Props> = ({
   vehC,
   vehD,
   activeAlgos,
+  hungarianResult,
+  mciMode,
+  mciGreedyTotal,
+  mciHungarianTotal,
+  savingsPct,
 }) => {
   const etaLabel = (veh: VehicleTelemetry | null) => {
     if (!veh) return "–";
@@ -100,13 +110,106 @@ export const BottomMetrics: React.FC<Props> = ({
 
         <div style={{ display: "flex", gap: 12 }}>
           <MetricCell label="Nodes" value={String(nodes)} />
-          <MetricCell label="Travel" value={`${time.toFixed(1)}m`} />
+          <MetricCell label="Travel" value={veh ? `${time.toFixed(1)}m` : "–"} />
           <MetricCell label="Runtime" value={runtime > 0 ? `${runtime.toFixed(1)}ms` : "–"} />
           <MetricCell label="ETA left" value={etaLabel(veh)} highlight={textColor} />
         </div>
       </div>
     );
   };
+
+  const renderHungarianCard = () => {
+    if (!hungarianResult) return null;
+    const hColor = "#ef4444";
+    const hTextColor = "#f87171";
+    return (
+      <div
+        key="hungarian"
+        style={{
+          padding: "10px 14px",
+          borderRadius: 12,
+          background: `${hColor}06`,
+          border: `1px solid ${hColor}20`,
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          transition: "all 0.3s ease",
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 65 }}>
+          <div
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: hColor,
+              boxShadow: `0 0 8px ${hColor}`,
+            }}
+          />
+          <span style={{ fontSize: 9, fontWeight: 800, color: hTextColor, letterSpacing: "0.08em", textTransform: "uppercase", textAlign: "center" }}>
+            Hungarian
+          </span>
+          <span style={{ fontSize: 9, color: "#475569", fontWeight: 600 }}>Assignment</span>
+        </div>
+
+        <div style={{ width: 1, height: 38, background: "rgba(255,255,255,0.07)" }} />
+
+        <div style={{ display: "flex", gap: 12 }}>
+          <MetricCell label="Optimal" value={`${hungarianResult.hungarian_cost.toFixed(1)}m`} />
+          <MetricCell label="Greedy" value={`${hungarianResult.greedy_cost.toFixed(1)}m`} />
+          <MetricCell label="Savings" value={`${hungarianResult.savings_pct.toFixed(1)}%`} highlight={hTextColor} />
+        </div>
+      </div>
+    );
+  };
+
+  if (mciMode) {
+    const savings = savingsPct ?? 0;
+    return (
+      <div
+        style={{
+          position: "absolute",
+          bottom: 16,
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 100,
+          width: "90%",
+          maxWidth: 900,
+          display: "flex",
+          justifyContent: "center",
+        }}
+      >
+        <div style={{ ...panelStyle, width: "100%", justifyContent: "space-around" }}>
+          {/* Greedy Fleet */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#3B82F6", boxShadow: "0 0 8px #3B82F6" }} />
+                <span style={{ fontSize: 11, fontWeight: 800, color: "#93c5fd", letterSpacing: "0.06em", textTransform: "uppercase" }}>Greedy Fleet</span>
+              </div>
+              <span style={{ fontSize: 9, color: "#475569", fontWeight: 600 }}>Nearest-Incident Dispatch</span>
+            </div>
+            <MetricCell label="Total wait cost" value={`${(mciGreedyTotal ?? 0).toFixed(1)}m`} />
+          </div>
+
+          <div style={{ width: 1, height: 42, background: "rgba(255,255,255,0.08)" }} />
+
+          {/* Hungarian Fleet */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 8px #ef4444" }} />
+                <span style={{ fontSize: 11, fontWeight: 800, color: "#fca5a5", letterSpacing: "0.06em", textTransform: "uppercase" }}>Hungarian Fleet</span>
+              </div>
+              <span style={{ fontSize: 9, color: "#475569", fontWeight: 600 }}>Optimal Fleet Assignment</span>
+            </div>
+            <MetricCell label="Total wait cost" value={`${(mciHungarianTotal ?? 0).toFixed(1)}m`} />
+            <MetricCell label="Saved" value={`${savings.toFixed(1)}%`} highlight="#4ade80" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -127,6 +230,7 @@ export const BottomMetrics: React.FC<Props> = ({
         {renderCard("B", "A*", "#22C55E", "#4ade80", vehB)}
         {renderCard("C", "Greedy BFS", "#F97316", "#fed7aa", vehC)}
         {renderCard("D", "Bellman-Ford", "#A855F7", "#f3e8ff", vehD)}
+        {renderHungarianCard()}
       </div>
     </div>
   );

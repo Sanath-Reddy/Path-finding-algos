@@ -14,7 +14,7 @@ def hungarian_assign(cost_matrix):
         import numpy as np
         row_ind, col_ind = linear_sum_assignment(np.array(cost_matrix))
         total_cost = sum(cost_matrix[i][col_ind[i]] for i in range(len(cost_matrix)))
-        return list(col_ind), float(total_cost)
+        return [int(x) for x in col_ind], float(total_cost)
     except ImportError:
         # Standalone pure Python Hungarian algorithm solver for NxN matrix
         return _pure_python_hungarian(cost_matrix)

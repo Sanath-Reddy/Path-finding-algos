@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
-import { TelemetryPayload, TrafficAlert, HungarianResult } from "./types";
+import { TelemetryPayload, TrafficAlert, HungarianResult, MCIVehicle } from "./types";
 import { MapPanel } from "./components/MapPanel";
 import { BottomMetrics } from "./components/BottomMetrics";
 import { ResultModal } from "./components/ResultModal";
 import { AlgorithmSelector } from "./components/AlgorithmSelector";
 import { HungarianPanel } from "./components/HungarianPanel";
+import { DemoScenarios } from "./components/DemoScenarios";
 
 type Step = "STANDBY" | "COMPUTING" | "SIMULATING" | "ARRIVED";
 
@@ -38,10 +39,12 @@ export default function App() {
   const [alert, setAlert]         = useState<string | null>(null);
   const [isResultOpen, setResult] = useState(false);
   const [selectedHosp, setSelHosp] = useState<string | null>(null);
-  const [splitView, setSplitView] = useState(false);   // ← NEW
+  const [splitView, setSplitView] = useState(false);
   const [activeAlgos, setActiveAlgos] = useState<Set<string>>(new Set(["A", "B", "C", "D"]));
   const [showHungarian, setShowHungarian] = useState(false);
-  const [hungarianResult, setHungarianResult] = useState<HungarianResult | null>(null);
+  const [priority, setPriority] = useState<"Normal" | "Critical">("Critical");
+  const [specialty, setSpecialty] = useState<"General" | "Trauma" | "Cardiac" | "Stroke">("Trauma");
+  const [activeScenario, setActiveScenario] = useState<string | null>(null);
 
   const stepRef = useRef<Step>("STANDBY");
   const wsRef   = useRef<WebSocket | null>(null);
@@ -70,23 +73,32 @@ export default function App() {
         setTel(d);
         const va = d.veh_a, vb = d.veh_b, vc = d.veh_c, vd = d.veh_d;
         
-        const allTransporting = Array.from(activeAlgosRef.current).every(id => {
-          const veh = id === "A" ? va : id === "B" ? vb : id === "C" ? vc : vd;
-          return !veh || veh.status === "TRANSPORTING" || veh.status === "ARRIVED";
-        });
-        if (allTransporting && !patientPickedUp.current && (va || vb || vc || vd)) {
-          patientPickedUp.current = true;
-          showAlert("🚑 Patient picked up — racing to hospital!");
-        }
+        if (d.mci_mode) {
+          const mciFinished = d.mci_hungarian_vehicles?.every(v => v.status === "ARRIVED") ?? false;
+          if (mciFinished && !missionDone.current && stepRef.current === "SIMULATING") {
+            missionDone.current = true;
+            go("ARRIVED");
+            setResult(true);
+          }
+        } else {
+          const allTransporting = Array.from(activeAlgosRef.current).every(id => {
+            const veh = id === "A" ? va : id === "B" ? vb : id === "C" ? vc : vd;
+            return !veh || veh.status === "TRANSPORTING" || veh.status === "ARRIVED";
+          });
+          if (allTransporting && !patientPickedUp.current && (va || vb || vc || vd)) {
+            patientPickedUp.current = true;
+            showAlert("🚑 Patient picked up — racing to hospital!");
+          }
 
-        const activeFinished = Array.from(activeAlgosRef.current).every(id => {
-          const veh = id === "A" ? va : id === "B" ? vb : id === "C" ? vc : vd;
-          return !veh || veh.status === "ARRIVED";
-        });
-        if (activeFinished && !missionDone.current && stepRef.current === "SIMULATING") {
-          missionDone.current = true;
-          go("ARRIVED");
-          setResult(true);
+          const activeFinished = Array.from(activeAlgosRef.current).every(id => {
+            const veh = id === "A" ? va : id === "B" ? vb : id === "C" ? vc : vd;
+            return !veh || veh.status === "ARRIVED";
+          });
+          if (activeFinished && !missionDone.current && stepRef.current === "SIMULATING") {
+            missionDone.current = true;
+            go("ARRIVED");
+            setResult(true);
+          }
         }
       }
       if (msg.type === "TRAFFIC_ALERT") {
@@ -103,7 +115,7 @@ export default function App() {
   useEffect(() => { connectWS(); return () => wsRef.current?.close(); }, []);
 
   /* ── Toast ─────────────────────────────────────────────────────────── */
-  const showAlert = (msg: string, ms = 5000) => {
+  const showAlert = (msg: string, ms = 6000) => {
     setAlert(msg);
     setTimeout(() => setAlert(null), ms);
   };
@@ -117,17 +129,16 @@ export default function App() {
 
     go("COMPUTING");
     setResult(false); setSelHosp(null); setAlert(null);
+    setActiveScenario(null);
 
-    await post("/reset");
 
     try {
-      const res  = await post("/emergency", { node: nodeId, priority: "Critical", specialty: "Trauma" });
+      const res  = await post("/emergency", { node: nodeId, priority, specialty });
       const json = await res.json();
       if (json.status !== "success") {
         showAlert(`⚠️ ${json.message ?? "Could not dispatch"}`);
         go("STANDBY"); return;
       }
-      /* find selected hospital from path endpoint */
       const t: TelemetryPayload = json.data;
       if (t.veh_a?.path_to_hospital?.length) {
         const dest = t.veh_a.path_to_hospital[t.veh_a.path_to_hospital.length - 1];
@@ -135,10 +146,13 @@ export default function App() {
         if (h) setSelHosp(h.id);
       }
       go("SIMULATING");
-      /* auto-inject accident at 6 s to show A* rerouting */
-      trafficTimerRef.current = setTimeout(async () => {
-        if (stepRef.current === "SIMULATING") await post("/traffic/accident");
-      }, 6000);
+      
+      // Auto accident after 6s unless disaster mode is active
+      if (!t.disaster_mode) {
+        trafficTimerRef.current = setTimeout(async () => {
+          if (stepRef.current === "SIMULATING") await post("/traffic/accident");
+        }, 6000);
+      }
     } catch {
       showAlert("⚠️ Backend unreachable — is the server running?");
       go("STANDBY");
@@ -150,55 +164,65 @@ export default function App() {
     await post("/reset");
     go("STANDBY"); setResult(false); setSelHosp(null); setAlert(null);
     setSplitView(false);
+    setActiveScenario(null);
     patientPickedUp.current = false; missionDone.current = false;
   };
 
   const handleRunDemo = async () => {
-    if (stepRef.current === "SIMULATING") return;
-    if (trafficTimerRef.current) clearTimeout(trafficTimerRef.current);
+    // Falls back to heuristic trap scenario
+    await handleTriggerScenario("heuristic");
+  };
 
+  const handleTriggerScenario = async (scenarioId: string) => {
+    if (trafficTimerRef.current) clearTimeout(trafficTimerRef.current);
     patientPickedUp.current = false;
     missionDone.current     = false;
+
     go("COMPUTING");
     setResult(false); setSelHosp(null); setAlert(null);
-    setSplitView(false);
+    setActiveScenario(scenarioId);
 
     try {
-      const res  = await post("/demo");
+      const res = await post(`/demo/${scenarioId}`);
       const json = await res.json();
-
       if (json.status !== "success") {
-        showAlert(`⚠️ Demo failed: ${json.message ?? "unknown error"}`);
-        go("STANDBY"); return;
+        showAlert(`⚠️ Scenario failed: ${json.message ?? "unknown error"}`);
+        go("STANDBY");
+        setActiveScenario(null);
+        return;
       }
 
-      /* find selected hospital */
       const t: TelemetryPayload = json.data;
-      if (t.veh_a?.path_to_hospital?.length) {
-        const dest = t.veh_a.path_to_hospital[t.veh_a.path_to_hospital.length - 1];
-        const h = t.hospitals.find(h => `${h.node[0]},${h.node[1]}` === dest);
-        if (h) setSelHosp(h.id);
-      }
-
       go("SIMULATING");
 
-      /* ── Auto split-view after a short delay so map renders first ── */
-      setTimeout(() => setSplitView(true), 800);
+      // Apply layout presets automatically for visual clarity
+      if (scenarioId === "open-city") {
+        handlePresetAlgo("ALL");
+      } else if (scenarioId === "heuristic") {
+        handlePresetAlgo("DIJKSTRA_VS_ASTAR");
+        trafficTimerRef.current = setTimeout(async () => {
+          if (stepRef.current === "SIMULATING") await post("/demo/block");
+        }, 6000);
+      } else if (scenarioId === "rerouting") {
+        handlePresetAlgo("DIJKSTRA_VS_ASTAR");
+        trafficTimerRef.current = setTimeout(async () => {
+          if (stepRef.current === "SIMULATING") await post("/demo/block");
+        }, 5000);
+      } else if (scenarioId === "maze") {
+        setActiveAlgos(new Set(["A", "C"]));
+        setSplitView(true);
+      } else if (scenarioId === "mci") {
+        setSplitView(true);
+      }
 
-      /* ── Announcements ── */
-      const activeNames = Array.from(activeAlgos).map(id => id === 'A' ? 'Dijkstra' : id === 'B' ? 'A*' : id === 'C' ? 'Greedy BFS' : 'Bellman-Ford').join(" vs ");
-      showAlert(`🎯 Demo: ${activeNames} — watch the routing comparison unfold!`);
-
-      /* ── At 5 s: block roads on Dijkstra's route (not A*'s) ── */
-      trafficTimerRef.current = setTimeout(async () => {
-        if (stepRef.current !== "SIMULATING") return;
-        await post("/demo/block");
-        // Toast is sent via WS TRAFFIC_ALERT
-      }, 5000);
-
+      const activeNames = scenarioId === "mci" 
+        ? "Hungarian Assignment" 
+        : Array.from(activeAlgos).map(id => id === 'A' ? 'Dijkstra' : id === 'B' ? 'A*' : id === 'C' ? 'Greedy BFS' : 'Bellman-Ford').join(" vs ");
+      showAlert(`🎯 Scenario activated: ${activeNames}`);
     } catch {
-      showAlert("⚠️ Backend unreachable — is the server running?");
+      showAlert("⚠️ Backend unreachable.");
       go("STANDBY");
+      setActiveScenario(null);
     }
   };
 
@@ -213,7 +237,7 @@ export default function App() {
   };
 
   const handlePresetAlgo = (preset: string) => {
-    setSplitView(true);
+    setSplitView(preset !== "ALL" || activeAlgos.size > 1);
     if (preset === "DIJKSTRA_VS_ASTAR") {
       setActiveAlgos(new Set(["A", "B"]));
     } else if (preset === "OPTIMAL_VS_GREEDY") {
@@ -222,9 +246,26 @@ export default function App() {
       setActiveAlgos(new Set(["A", "D", "B", "C"]));
     } else if (preset === "ALL") {
       setActiveAlgos(new Set(["A", "B", "C", "D"]));
-    } else {
-      setActiveAlgos(new Set(["A", "B", "C", "D"]));
+      setSplitView(true);
     }
+  };
+
+  const handleDisasterToggle = async () => {
+    try {
+      if (tel?.disaster_mode) {
+        await post("/traffic/clear");
+        showAlert("🟢 Disaster mode cleared. Roads restored.");
+      } else {
+        await post("/traffic/disaster");
+        showAlert("💥 Disaster mode active! Multiple roads completely blocked.");
+      }
+    } catch {
+      showAlert("⚠️ Failed to communicate with traffic controller.");
+    }
+  };
+
+  const handleHungarianDemo = async () => {
+    await handleTriggerScenario("mci");
   };
 
   const spd = tel?.speed_multiplier ?? 1;
@@ -232,11 +273,14 @@ export default function App() {
 
   const statusText = () => {
     if (!connected) return "⚡ Connecting to backend...";
-    if (step === "STANDBY")   return "👆 Click any node on the map to create an emergency";
-    if (step === "COMPUTING") return "⚙️ Computing Dijkstra & A* routes...";
+    if (step === "STANDBY")   return "👆 Click any intersection on the map to dispatch";
+    if (step === "COMPUTING") return "⚙️ Dispatching ambulances & computing routes...";
     if (step === "SIMULATING") {
+      if (tel?.mci_mode) {
+        return "🚨 Mass Casualty Response simulation active...";
+      }
       const s = tel?.veh_b?.status;
-      if (s === "RESPONDING")   return "🚑 Ambulances racing to patient";
+      if (s === "RESPONDING")   return "🚑 Ambulances responding to patient";
       if (s === "TRANSPORTING") return "🏥 Transporting patient to hospital";
       return "🏁 Approaching hospital...";
     }
@@ -257,11 +301,17 @@ export default function App() {
     onNodeClick:    handleNodeClick,
     step,
     activeAlgos,
+    disasterMode:   tel.disaster_mode,
+    mciMode:        tel.mci_mode,
+    mciEmergencies: tel.mci_emergencies,
+    mciGreedyVehicles: tel.mci_greedy_vehicles,
+    mciHungarianVehicles: tel.mci_hungarian_vehicles,
   } : null;
 
   /* ── Inline stat card for each split panel ─────────────────────────── */
-  const StatCard = ({ veh, color, label, bg, bd, isCompact }: {
+  const StatCard = ({ veh, color, label, bg, bd, isCompact, customStats }: {
     veh: any; color: string; label: string; bg: string; bd: string; isCompact?: boolean;
+    customStats?: { explored: string; cost: string; status: string };
   }) => (
     <div style={{
       position: "absolute", bottom: isCompact ? 6 : 12, left: "50%", transform: "translateX(-50%)",
@@ -280,9 +330,9 @@ export default function App() {
         <span style={{ fontSize: isCompact ? 9 : 10, fontWeight: 800, color, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</span>
       </div>
       {[
-        { k: "Nodes", v: veh?.nodes_explored ?? "–" },
-        { k: "Travel", v: veh ? `${(veh.accumulated_cost ?? 0).toFixed(1)}m` : "–" },
-        { k: "Status", v: veh?.status === "RESPONDING" ? "→ Pat" : veh?.status === "TRANSPORTING" ? "→ Hosp" : veh?.status === "ARRIVED" ? "✓ Done" : "–" },
+        { k: "Nodes", v: customStats ? customStats.explored : (veh?.nodes_explored ?? "–") },
+        { k: "Travel", v: customStats ? customStats.cost : (veh ? `${(veh.accumulated_cost ?? 0).toFixed(1)}m` : "–") },
+        { k: "Status", v: customStats ? customStats.status : (veh?.status === "RESPONDING" ? "→ Pat" : veh?.status === "TRANSPORTING" ? "→ Hosp" : veh?.status === "ARRIVED" ? "✓ Done" : "–") },
       ].map(({ k, v }) => (
         <div key={k} style={{ textAlign: "center" }}>
           <div style={{ fontSize: isCompact ? 7 : 8, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em" }}>{k}</div>
@@ -298,6 +348,7 @@ export default function App() {
     { id: "C", name: "Greedy BFS", color: "#F97316", textColor: "#fed7aa", label: "Greedy BFS — Heuristic Only" },
     { id: "D", name: "Bellman-Ford", color: "#A855F7", textColor: "#f3e8ff", label: "Bellman-Ford — Iterative Relaxation" },
   ];
+  
   const algosList = ALGO_CONFIG
     .filter(a => activeAlgos.has(a.id))
     .map(a => ({
@@ -305,429 +356,457 @@ export default function App() {
       veh: tel ? (a.id === "A" ? tel.veh_a : a.id === "B" ? tel.veh_b : a.id === "C" ? tel.veh_c : tel.veh_d) : null,
     }));
 
-  if (tel && splitView) {
-    return (
-      <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column",
-                    background: "#07101e", overflow: "hidden", fontFamily: "'Inter', sans-serif" }}>
-        
-        {/* ─── SLIM TOP HEADER BAR ─── */}
-        <div style={{
-          height: 52,
-          minHeight: 52,
-          background: "rgba(8, 14, 28, 0.95)",
-          borderBottom: "1px solid rgba(255,255,255,0.08)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0 16px",
-          zIndex: 300,
-          boxShadow: "0 4px 20px rgba(0,0,0,0.3)"
-        }}>
-          {/* Left: Title & Status indicator */}
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 8, height: 8, borderRadius: "50%",
-                          background: connected ? "#22c55e" : "#ef4444",
-                          boxShadow: connected ? "0 0 10px #22c55e" : "0 0 10px #ef4444" }} />
-            <span style={{ fontWeight: 800, fontSize: 13, color: "#fff", letterSpacing: ".02em" }}>
-              Smart Dispatch Command Center
-            </span>
-            <span style={{ fontSize: 11, color: "#94a3b8", borderLeft: "1px solid rgba(255,255,255,0.15)", paddingLeft: 12 }}>
-              {statusText()}
-            </span>
-            {selectedHosp && (() => {
-              const h = tel.hospitals.find(h => h.id === selectedHosp);
-              return h ? (
-                <span style={{ fontSize: 10, color: "#67e8f9", background: "rgba(6,182,212,.08)", padding: "2px 8px", borderRadius: 4, border: "1px solid rgba(6,182,212,.2)" }}>
-                  🏥 Target: {h.name}
-                </span>
-              ) : null;
-            })()}
-          </div>
+  const isMCI = !!tel?.mci_mode;
 
-          {/* Right: Inline Controls */}
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            {/* Traffic injection buttons (very compact) */}
-            {isSimActive && (
-              <div style={{ display: "flex", alignItems: "center", gap: 6, paddingRight: 12, borderRight: "1px solid rgba(255,255,255,0.15)" }}>
-                <span style={{ fontSize: 9, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em" }}>Traffic:</span>
-                <button onClick={() => post("/traffic/congestion")} style={btnTrafficCongest}>🚧 Congestion</button>
-                <button onClick={() => post("/traffic/accident")} style={btnTrafficAccident}>💥 Accident</button>
-                <button onClick={() => post("/traffic/clear")} style={btnTrafficClear}>✓ Clear</button>
-                
-                <button onClick={() => post("/pause", { paused: !tel.is_paused })} style={btnPlayPause}>
-                  {tel.is_paused ? "▶ Play" : "⏸ Pause"}
-                </button>
-                <div style={{ display: "flex", gap: 2 }}>
-                  {[1, 2, 4].map(s => (
-                    <button key={s} onClick={() => post("/speed", { speed: s })}
-                      style={{ padding: "3px 6px", fontSize: 9, fontWeight: 700, borderRadius: 4,
-                                border: "none", cursor: "pointer",
-                                background: spd === s ? "#22c55e" : "rgba(255,255,255,.05)",
-                                color: spd === s ? "#fff" : "#64748b" }}>
-                      {s}x
-                    </button>
-                  ))}
-                </div>
+  return (
+    <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column",
+                  background: "#07101e", overflow: "hidden", fontFamily: "'Inter', sans-serif" }}>
+      
+      {/* ─── 1. TOP HEADER NAVIGATION BAR ─── */}
+      <div style={{
+        height: 52,
+        minHeight: 52,
+        background: "rgba(8, 14, 28, 0.95)",
+        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "0 16px",
+        zIndex: 300,
+        boxShadow: "0 4px 20px rgba(0,0,0,0.3)"
+      }}>
+        {/* Left: Connection and Status */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%",
+                        background: connected ? "#22c55e" : "#ef4444",
+                        boxShadow: connected ? "0 0 10px #22c55e" : "0 0 10px #ef4444" }} />
+          <span style={{ fontWeight: 900, fontSize: 14, color: "#fff", letterSpacing: ".02em" }}>
+            🚑 EOC Smart Dispatch
+          </span>
+          <span style={{ fontSize: 11, color: "#94a3b8", borderLeft: "1px solid rgba(255,255,255,0.15)", paddingLeft: 12 }}>
+            {statusText()}
+          </span>
+          {selectedHosp && tel && (() => {
+            const h = tel.hospitals.find(h => h.id === selectedHosp);
+            return h ? (
+              <span style={{ fontSize: 10, color: "#67e8f9", background: "rgba(6,182,212,.08)", padding: "2px 8px", borderRadius: 4, border: "1px solid rgba(6,182,212,.2)" }}>
+                🏥 Target: {h.name}
+              </span>
+            ) : null;
+          })()}
+        </div>
+
+        {/* Right: Inline Simulation and Quick Controls */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {/* Traffic injection buttons (only visible if simulation is active) */}
+          {isSimActive && !isMCI && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, paddingRight: 12, borderRight: "1px solid rgba(255,255,255,0.15)" }}>
+              <span style={{ fontSize: 9, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em" }}>Traffic:</span>
+              <button onClick={() => post("/traffic/congestion")} style={btnTrafficCongest}>🚧 Congest</button>
+              <button onClick={() => post("/traffic/accident")} style={btnTrafficAccident}>💥 Accident</button>
+              <button onClick={() => post("/traffic/clear")} style={btnTrafficClear}>✓ Clear</button>
+              
+              <button onClick={() => post("/pause", { paused: !tel?.is_paused })} style={btnPlayPause}>
+                {tel?.is_paused ? "▶ Play" : "⏸ Pause"}
+              </button>
+              <div style={{ display: "flex", gap: 2 }}>
+                {[1, 2, 4].map(s => (
+                  <button key={s} onClick={() => post("/speed", { speed: s })}
+                    style={{ padding: "3px 6px", fontSize: 9, fontWeight: 700, borderRadius: 4,
+                              border: "none", cursor: "pointer",
+                              background: spd === s ? "#22c55e" : "rgba(255,255,255,.05)",
+                              color: spd === s ? "#fff" : "#64748b" }}>
+                    {s}x
+                  </button>
+                ))}
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Split View Toggle + Reset */}
+          {isMCI && isSimActive && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, paddingRight: 12, borderRight: "1px solid rgba(255,255,255,0.15)" }}>
+              <button onClick={() => post("/pause", { paused: !tel?.is_paused })} style={btnPlayPause}>
+                {tel?.is_paused ? "▶ Play" : "⏸ Pause"}
+              </button>
+              <div style={{ display: "flex", gap: 2 }}>
+                {[1, 2, 4].map(s => (
+                  <button key={s} onClick={() => post("/speed", { speed: s })}
+                    style={{ padding: "3px 6px", fontSize: 9, fontWeight: 700, borderRadius: 4,
+                              border: "none", cursor: "pointer",
+                              background: spd === s ? "#22c55e" : "rgba(255,255,255,.05)",
+                              color: spd === s ? "#fff" : "#64748b" }}>
+                    {s}x
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Quick Preset Actions */}
+          {step === "STANDBY" && (
+            <button onClick={handleRunDemo} style={btnPrimary}>▶ Auto Demo</button>
+          )}
+
+          {!isMCI && (
             <button
               onClick={() => setSplitView(v => !v)}
               style={{
                 padding: "6px 12px", fontWeight: 800, fontSize: 11, borderRadius: 8,
                 border: "none", cursor: "pointer", letterSpacing: ".04em",
                 textTransform: "uppercase",
-                background: "linear-gradient(135deg,#3b82f6 0%,#22c55e 100%)",
-                color: "#fff",
-                boxShadow: "0 0 12px rgba(59,130,246,0.3)"
-              }}
-            >
-              ⊟ Full View
-            </button>
-            <button onClick={handleReset} style={{ ...btnSecondary, padding: "6px 12px", fontSize: 11, borderRadius: 8 }}>↺ Reset</button>
-          </div>
-        </div>
-
-        {/* ─── GRID CONTENT AREA ─── */}
-        <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          <div style={{ ...getGridStyle(algosList.length), flex: 1, minHeight: 0 }}>
-            {algosList.map((algo, index) => {
-              const singleAlgoSet = new Set([algo.id]);
-              const isLastCol = index === algosList.length - 1 || (algosList.length === 4 && index % 2 === 1);
-              const isLastRow = index >= algosList.length - 2 || algosList.length < 4;
-              
-              const panelBorderStyles: React.CSSProperties = {
-                position: "relative",
-                overflow: "hidden",
-                minHeight: 0,
-                borderRight: !isLastCol ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
-                borderBottom: !isLastRow ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
-              };
-
-              return (
-                <div key={algo.id} style={panelBorderStyles}>
-                  {/* Panel label */}
-                  <div style={{
-                    position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
-                    zIndex: 10, background: `${algo.color}18`,
-                    border: `1px solid ${algo.color}35`, borderRadius: 8,
-                    padding: "4px 12px", display: "flex", alignItems: "center", gap: 6,
-                    backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
-                  }}>
-                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: algo.color, boxShadow: `0 0 8px ${algo.color}` }}/>
-                    <span style={{ fontSize: 10, fontWeight: 800, color: algo.textColor, letterSpacing: ".05em", textTransform: "uppercase" }}>
-                      {algo.label}
-                    </span>
-                  </div>
-                  
-                  <MapPanel {...sharedMapProps!} activeAlgos={singleAlgoSet} />
-                  
-                  {isSimActive && (
-                    <StatCard 
-                      veh={algo.veh} 
-                      color={algo.color} 
-                      label={algo.name}
-                      bg={`${algo.color}15`} 
-                      bd={`${algo.color}35`} 
-                      isCompact={true}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* ─── TOAST ALERT ─── */}
-        {alert && (
-          <div style={{
-            position: "absolute", top: 66, left: "50%", transform: "translateX(-50%)",
-            zIndex: 300, ...glass({ padding: "10px 18px", borderLeft: "4px solid #ef4444",
-            display: "flex", alignItems: "center", gap: 10, borderRadius: 10 })
-          }}>
-            <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: "#f1f5f9" }}>{alert}</p>
-          </div>
-        )}
-
-        {/* ─── MODALS ─── */}
-        <ResultModal
-          isOpen={isResultOpen}
-          vehA={tel.veh_a}
-          vehB={tel.veh_b}
-          vehC={tel.veh_c}
-          vehD={tel.veh_d}
-          activeAlgos={activeAlgos}
-          onClose={handleReset}
-        />
-        {showHungarian && hungarianResult && (
-          <HungarianPanel
-            result={hungarianResult}
-            onClose={() => setShowHungarian(false)}
-          />
-        )}
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } } * { box-sizing: border-box; }`}</style>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ width: "100vw", height: "100vh", position: "relative",
-                  background: "#07101e", overflow: "hidden", fontFamily: "'Inter', sans-serif" }}>
-
-      {/* ════════ MAP AREA ════════ */}
-      <div style={{ position: "absolute", inset: 0 }}>
-        {!tel ? (
-          /* Loading */
-          <div style={{ width:"100%", height:"100%", display:"flex", flexDirection:"column",
-                        alignItems:"center", justifyContent:"center", gap:16 }}>
-            <div style={{ width:40, height:40, border:"2px solid rgba(34,197,94,.3)",
-                          borderTopColor:"#22c55e", borderRadius:"50%", animation:"spin 1s linear infinite" }} />
-            <span style={{ color:"#64748b", fontSize:13 }}>Connecting to simulation server…</span>
-          </div>
-        ) : splitView ? (
-          /* ── SPLIT VIEW ── */
-          <div style={getGridStyle(algosList.length)}>
-            {algosList.map((algo, index) => {
-              const singleAlgoSet = new Set([algo.id]);
-              const isLastCol = index === algosList.length - 1 || (algosList.length === 4 && index % 2 === 1);
-              const isLastRow = index >= algosList.length - 2 || algosList.length < 4;
-              
-              const panelBorderStyles: React.CSSProperties = {
-                position: "relative",
-                width: "100%",
-                height: "100%",
-                borderRight: !isLastCol ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
-                borderBottom: !isLastRow ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
-              };
-
-              return (
-                <div key={algo.id} style={panelBorderStyles}>
-                  {/* Panel label */}
-                  <div style={{
-                    position:"absolute", top:12, left:"50%", transform:"translateX(-50%)",
-                    zIndex:10, background: `${algo.color}18`,
-                    border:`1px solid ${algo.color}35`, borderRadius:10,
-                    padding:"6px 18px", display:"flex", alignItems:"center", gap:8,
-                    backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)",
-                  }}>
-                    <div style={{ width:9, height:9, borderRadius:"50%", background: algo.color, boxShadow:`0 0 8px ${algo.color}` }}/>
-                    <span style={{ fontSize:11, fontWeight:800, color: algo.textColor, letterSpacing:".07em", textTransform:"uppercase" }}>
-                      {algo.label}
-                    </span>
-                  </div>
-                  <MapPanel {...sharedMapProps!} activeAlgos={singleAlgoSet} />
-                  {isSimActive && (
-                    <StatCard 
-                      veh={algo.veh} 
-                      color={algo.color} 
-                      label={algo.name}
-                      bg={`${algo.color}10`} 
-                      bd={`${algo.color}30`} 
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          /* ── FULL VIEW ── */
-          <MapPanel {...sharedMapProps!} />
-        )}
-      </div>
-
-      {/* ════════ TOP-LEFT: TITLE + STATUS ════════ */}
-      <div style={{ position:"absolute", top:14, left:14, zIndex:200,
-                    display:"flex", flexDirection:"column", gap:8 }}>
-        <div style={glass({ padding:"10px 16px", display:"flex", alignItems:"center", gap:12 })}>
-          <div style={{ width:8, height:8, borderRadius:"50%",
-                        background: connected ? "#22c55e" : "#ef4444",
-                        boxShadow: connected ? "0 0 10px #22c55e" : "0 0 10px #ef4444" }} />
-          <span style={{ fontWeight:800, fontSize:13, color:"#fff", letterSpacing:".03em" }}>
-            Smart Ambulance Dispatch
-          </span>
-          <span style={{
-            fontSize:9, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase",
-            padding:"2px 8px", borderRadius:99,
-            background: connected ? "rgba(34,197,94,.14)" : "rgba(239,68,68,.14)",
-            color: connected ? "#4ade80" : "#f87171",
-            border: `1px solid ${connected ? "rgba(34,197,94,.3)" : "rgba(239,68,68,.3)"}`,
-          }}>
-            {connected ? "LIVE" : "OFFLINE"}
-          </span>
-        </div>
-        <div style={glass({ padding:"8px 14px", borderRadius:10 })}>
-          <p style={{ fontSize:12, color:"#cbd5e1", margin:0 }}>{statusText()}</p>
-        </div>
-        {selectedHosp && tel && (() => {
-          const h = tel.hospitals.find(h => h.id === selectedHosp);
-          return h ? (
-            <div style={glass({ padding:"8px 14px", borderRadius:10,
-              background:"rgba(6,182,212,.08)", borderColor:"rgba(6,182,212,.25)" })}>
-              <p style={{ fontSize:11, color:"#67e8f9", margin:0 }}>
-                🏥 <strong>Target:</strong> {h.name} — {h.specialty} · {h.beds} beds
-              </p>
-            </div>
-          ) : null;
-        })()}
-        <AlgorithmSelector
-          activeAlgos={activeAlgos}
-          onToggle={handleToggleAlgo}
-          onPreset={handlePresetAlgo}
-        />
-      </div>
-
-      {/* ════════ TOP-RIGHT: CONTROLS ════════ */}
-      <div style={{ position:"absolute", top:14, right:14, zIndex:200,
-                    display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end" }}>
-
-        {/* Primary buttons row */}
-        <div style={glass({ padding:8, display:"flex", gap:8, alignItems:"center" })}>
-          {step === "STANDBY" && (
-            <>
-              <button onClick={handleRunDemo} style={btnPrimary}>▶ Auto Demo</button>
-              <button
-                onClick={async () => {
-                  try {
-                    const res = await fetch(`${API}/hungarian-demo`);
-                    const json = await res.json();
-                    if (json.status === "success") {
-                      setHungarianResult(json.data);
-                      setShowHungarian(true);
-                    } else {
-                      showAlert(`⚠️ Hungarian optimization failed: ${json.message}`);
-                    }
-                  } catch {
-                    showAlert("⚠️ Backend unreachable.");
-                  }
-                }}
-                style={{
-                  ...btnPrimary,
-                  background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)",
-                  boxShadow: "0 0 18px rgba(239, 68, 68, 0.35)",
-                }}
-              >
-                📊 Hungarian Dispatch
-              </button>
-            </>
-          )}
-          {step === "COMPUTING" && (
-            <span style={{ padding:"9px 14px", fontSize:12, color:"#64748b", fontWeight:600 }}>Computing…</span>
-          )}
-
-          {/* ── SPLIT VIEW TOGGLE ── */}
-          {isSimActive && (
-            <button
-              onClick={() => setSplitView(v => !v)}
-              style={{
-                padding:"9px 16px", fontWeight:800, fontSize:12, borderRadius:10,
-                border:"none", cursor:"pointer", letterSpacing:".04em",
-                textTransform:"uppercase" as const,
-                background: splitView
-                  ? "linear-gradient(135deg,#3b82f6 0%,#22c55e 100%)"
-                  : "rgba(255,255,255,0.07)",
+                background: splitView ? "linear-gradient(135deg,#3b82f6 0%,#22c55e 100%)" : "rgba(255,255,255,.07)",
                 color: splitView ? "#fff" : "#94a3b8",
-                boxShadow: splitView ? "0 0 18px rgba(59,130,246,0.4)" : "none",
-                transition: "all 0.25s ease",
               }}
             >
               {splitView ? "⊟ Full View" : "⊞ Split View"}
             </button>
           )}
+          <button onClick={handleReset} style={{ ...btnSecondary, padding: "6px 12px", fontSize: 11, borderRadius: 8 }}>↺ Reset</button>
+        </div>
+      </div>
 
-          <button onClick={handleReset} style={btnSecondary}>↺ Reset</button>
+      {/* ─── 2. MAIN GRID AREA (Left Sidebar + Right Map Panels) ─── */}
+      <div style={{ flex: 1, display: "flex", minHeight: 0, overflow: "hidden", position: "relative" }}>
+        
+        {/* LEFT SIDEBAR (Controls & Telemetry Info) */}
+        <div style={{
+          width: 280,
+          minWidth: 280,
+          background: "rgba(10, 15, 30, 0.90)",
+          borderRight: "1px solid rgba(255, 255, 255, 0.08)",
+          padding: 16,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+          overflowY: "auto",
+          zIndex: 100,
+        }}>
+          {/* Section 0: Scenario Presets */}
+          <DemoScenarios
+            onTriggerScenario={handleTriggerScenario}
+            activeScenario={activeScenario}
+            disabled={step === "SIMULATING" || step === "COMPUTING"}
+          />
+
+          <hr style={{ border: "none", borderTop: "1px solid rgba(255, 255, 255, 0.06)", margin: 0 }} />
+
+          {/* Section 1: Active Route Comparison (Algorithm Selector) */}
+          <AlgorithmSelector
+            activeAlgos={activeAlgos}
+            onToggle={handleToggleAlgo}
+            onPreset={handlePresetAlgo}
+            onRunHungarian={handleHungarianDemo}
+            hungarianActive={isMCI || !!tel?.last_hungarian_result}
+            onShowHungarianMatrix={() => setShowHungarian(true)}
+            isSidebar={true}
+          />
+
+          <hr style={{ border: "none", borderTop: "1px solid rgba(255, 255, 255, 0.06)", margin: 0 }} />
+
+          {/* Section 2: Clinical Dispatch Decision System */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              🚑 Incident Parameters
+            </div>
+            
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {/* Severity Select */}
+              <div>
+                <span style={{ fontSize: 10, color: "#64748b", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: 4 }}>Severity</span>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {(["Normal", "Critical"] as const).map(p => (
+                    <button key={p} onClick={() => setPriority(p)}
+                      style={{
+                        flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 700, borderRadius: 6,
+                        border: "1px solid rgba(255,255,255,0.06)", cursor: "pointer",
+                        background: priority === p ? (p === "Critical" ? "#ef444430" : "#3b82f630") : "rgba(30, 41, 59, 0.25)",
+                        color: priority === p ? (p === "Critical" ? "#f87171" : "#60a5fa") : "#94a3b8",
+                        borderColor: priority === p ? (p === "Critical" ? "#ef444470" : "#3b82f670") : "rgba(255,255,255,0.06)",
+                      }}>
+                      {p === "Critical" ? "🔴 Critical" : "🔵 Normal"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Specialty Select */}
+              <div>
+                <span style={{ fontSize: 10, color: "#64748b", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: 4 }}>Specialty Required</span>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                  {(["General", "Trauma", "Cardiac", "Stroke"] as const).map(s => (
+                    <button key={s} onClick={() => setSpecialty(s)}
+                      style={{
+                        padding: "6px 0", fontSize: 11, fontWeight: 700, borderRadius: 6,
+                        border: "1px solid rgba(255,255,255,0.06)", cursor: "pointer",
+                        background: specialty === s ? "rgba(34, 197, 94, 0.15)" : "rgba(30, 41, 59, 0.25)",
+                        color: specialty === s ? "#4ade80" : "#94a3b8",
+                        borderColor: specialty === s ? "rgba(34, 197, 94, 0.4)" : "rgba(255,255,255,0.06)",
+                      }}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <hr style={{ border: "none", borderTop: "1px solid rgba(255, 255, 255, 0.06)", margin: 0 }} />
+
+          {/* Section 3: Special Operations (Disaster only — Hungarian moved to Route Comparison above) */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              🛠️ Command Directives
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {/* Disaster Button */}
+              <button onClick={handleDisasterToggle}
+                style={{
+                  width: "100%", padding: "9px 0", borderRadius: 8, border: "none", cursor: "pointer",
+                  fontSize: 11, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.06em",
+                  color: "#fff",
+                  background: tel?.disaster_mode
+                    ? "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                    : "linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)",
+                  boxShadow: tel?.disaster_mode
+                    ? "0 0 14px rgba(16, 185, 129, 0.3)"
+                    : "0 0 14px rgba(239, 68, 68, 0.3)",
+                }}>
+                {tel?.disaster_mode ? "🟢 Clear Disaster Mode" : "💥 Activate Disaster"}
+              </button>
+            </div>
+          </div>
+
+          <hr style={{ border: "none", borderTop: "1px solid rgba(255, 255, 255, 0.06)", margin: 0 }} />
+
+          {/* Section 4: Live Bed capacities */}
+          {tel && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  🏥 Hospital Beds
+                </span>
+                {tel.global_stats.hospital_overflow_count !== undefined && tel.global_stats.hospital_overflow_count > 0 && (
+                  <span style={{ fontSize: 9, color: "#f87171", background: "rgba(239,68,68,0.15)", padding: "1px 5px", borderRadius: 4, fontWeight: 700 }}>
+                    ⚠️ {tel.global_stats.hospital_overflow_count} Overflow
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {tel.hospitals.map(h => {
+                  const pct = (h.beds / 14) * 100;
+                  const isFull = h.beds === 0;
+                  return (
+                    <div key={h.id}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#cbd5e1", fontWeight: 600 }}>
+                        <span style={{ textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: 170 }}>
+                          {h.name}
+                        </span>
+                        <span style={{ fontFamily: "monospace", color: isFull ? "#ef4444" : "#4ade80" }}>
+                          {h.beds}/14
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", marginTop: 4 }}>
+                        <input
+                          type="range"
+                          min="0"
+                          max="14"
+                          value={h.beds}
+                          onChange={async (e) => {
+                            const val = parseInt(e.target.value);
+                            await post("/hospitals/beds", { id: h.id, beds: val });
+                          }}
+                          style={{
+                            width: "100%",
+                            accentColor: isFull ? "#ef4444" : h.beds <= 3 ? "#f59e0b" : "#10b981",
+                            background: "rgba(255,255,255,0.08)",
+                            borderRadius: 4,
+                            outline: "none",
+                            height: 6,
+                            cursor: "ew-resize",
+                          }}
+                        />
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#64748b", marginTop: 2 }}>
+                        <span>Spec: {h.specialty}</span>
+                        <span>Node: {h.node[0]},{h.node[1]}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Traffic controls */}
-        {isSimActive && (
-          <div style={glass({ padding:"10px 12px", display:"flex", flexDirection:"column", gap:8, minWidth:230 })}>
-            <span style={{ fontSize:9, fontWeight:800, color:"#475569", textTransform:"uppercase", letterSpacing:".09em" }}>
-              Inject Traffic Event
-            </span>
-            <div style={{ display:"flex", gap:6 }}>
-              {[
-                { label:"🚧 Congestion", c:"#f59e0b", bg:"rgba(245,158,11,.1)", bd:"rgba(245,158,11,.25)", fn:()=>post("/traffic/congestion") },
-                { label:"💥 Accident",   c:"#ef4444", bg:"rgba(239,68,68,.1)",  bd:"rgba(239,68,68,.25)",  fn:()=>post("/traffic/accident")   },
-                { label:"✓ Clear",       c:"#22c55e", bg:"rgba(34,197,94,.1)",  bd:"rgba(34,197,94,.25)",  fn:()=>post("/traffic/clear")      },
-              ].map(({ label, c, bg, bd, fn }) => (
-                <button key={label} onClick={fn} style={{
-                  flex:1, padding:"7px 4px", background:bg, color:c, fontWeight:700,
-                  fontSize:10, borderRadius:8, border:`1px solid ${bd}`, cursor:"pointer" }}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-              <button onClick={() => post("/pause", { paused: !tel?.is_paused })}
-                style={{ padding:"5px 10px", background:"rgba(255,255,255,.06)", color:"#e2e8f0",
-                          fontSize:10, fontWeight:700, borderRadius:6,
-                          border:"1px solid rgba(255,255,255,.08)", cursor:"pointer" }}>
-                {tel?.is_paused ? "▶ Play" : "⏸ Pause"}
-              </button>
-              <div style={{ marginLeft:"auto", display:"flex", gap:4 }}>
-                {[1, 2, 4].map(s => (
-                  <button key={s} onClick={() => post("/speed", { speed: s })}
-                    style={{ padding:"5px 8px", fontSize:10, fontWeight:700, borderRadius:6,
-                              border:"none", cursor:"pointer",
-                              background: spd === s ? "#22c55e" : "rgba(255,255,255,.06)",
-                              color: spd === s ? "#fff" : "#64748b" }}>
-                    {s}×
-                  </button>
+        {/* RIGHT PANEL (Map View Container) */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, position: "relative" }}>
+          
+          {/* Map grid display */}
+          <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+            {!tel ? (
+              /* Loading screen */
+              <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column",
+                            alignItems: "center", justifyContent: "center", gap: 16 }}>
+                <div style={{ width: 40, height: 40, border: "2px solid rgba(34,197,94,.3)",
+                              borderTopColor: "#22c55e", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                <span style={{ color: "#64748b", fontSize: 13 }}>Connecting to simulation server…</span>
+              </div>
+            ) : isMCI && splitView ? (
+              /* MCI Split Screen Mode: Greedy Assignment vs Hungarian Assignment */
+              <div style={getGridStyle(2)}>
+                {[
+                  { id: "greedy", name: "Greedy Fleet", color: "#3B82F6", textColor: "#60a5fa", label: "Greedy Assignment — Nearest Incident First", keyAlgos: new Set(["C"]) },
+                  { id: "hungarian", name: "Hungarian Fleet", color: "#ef4444", textColor: "#fca5a5", label: "Hungarian Assignment — Globally Optimal", keyAlgos: new Set(["B"]) }
+                ].map((mciItem, index) => {
+                  const isLastCol = index === 1;
+                  const arrivedCount = index === 0
+                    ? (tel.mci_greedy_vehicles?.filter(v => v.status === "ARRIVED").length ?? 0)
+                    : (tel.mci_hungarian_vehicles?.filter(v => v.status === "ARRIVED").length ?? 0);
+                  const costVal = index === 0 ? tel.mci_greedy_total : tel.mci_hungarian_total;
+                  
+                  return (
+                    <div key={mciItem.id} style={{
+                      position: "relative",
+                      width: "100%",
+                      height: "100%",
+                      borderRight: !isLastCol ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
+                    }}>
+                      <div style={{
+                        position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+                        zIndex: 10, background: `${mciItem.color}18`,
+                        border: `1px solid ${mciItem.color}35`, borderRadius: 10,
+                        padding: "6px 18px", display: "flex", alignItems: "center", gap: 8,
+                        backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                      }}>
+                        <div style={{ width: 9, height: 9, borderRadius: "50%", background: mciItem.color, boxShadow: `0 0 8px ${mciItem.color}` }}/>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: mciItem.textColor, letterSpacing: ".07em", textTransform: "uppercase" }}>
+                          {mciItem.label}
+                        </span>
+                      </div>
+                      <MapPanel {...sharedMapProps!} activeAlgos={mciItem.keyAlgos} />
+                      {isSimActive && (
+                        <StatCard 
+                          veh={null}
+                          customStats={{
+                            explored: "N/A",
+                            cost: `${(costVal ?? 0).toFixed(1)}m`,
+                            status: `${arrivedCount}/4 Arrived`
+                          }}
+                          color={mciItem.color} 
+                          label={mciItem.name}
+                          bg={`${mciItem.color}10`} 
+                          bd={`${mciItem.color}30`} 
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : splitView ? (
+              /* Regular Split Screen Mode */
+              <div style={getGridStyle(algosList.length)}>
+                {algosList.map((algo, index) => {
+                  const singleAlgoSet = new Set([algo.id]);
+                  const isLastCol = index === algosList.length - 1 || (algosList.length === 4 && index % 2 === 1);
+                  const isLastRow = index >= algosList.length - 2 || algosList.length < 4;
+                  
+                  const panelBorderStyles: React.CSSProperties = {
+                    position: "relative",
+                    width: "100%",
+                    height: "100%",
+                    borderRight: !isLastCol ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
+                    borderBottom: !isLastRow ? "2px solid rgba(255, 255, 255, 0.15)" : "none",
+                  };
+
+                  return (
+                    <div key={algo.id} style={panelBorderStyles}>
+                      {/* Sub-Panel Header */}
+                      <div style={{
+                        position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+                        zIndex: 10, background: `${algo.color}18`,
+                        border: `1px solid ${algo.color}35`, borderRadius: 10,
+                        padding: "6px 18px", display: "flex", alignItems: "center", gap: 8,
+                        backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+                      }}>
+                        <div style={{ width: 9, height: 9, borderRadius: "50%", background: algo.color, boxShadow: `0 0 8px ${algo.color}` }}/>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: algo.textColor, letterSpacing: ".07em", textTransform: "uppercase" }}>
+                          {algo.label}
+                        </span>
+                      </div>
+                      <MapPanel {...sharedMapProps!} activeAlgos={singleAlgoSet} />
+                      {isSimActive && (
+                        <StatCard 
+                          veh={algo.veh} 
+                          color={algo.color} 
+                          label={algo.name}
+                          bg={`${algo.color}10`} 
+                          bd={`${algo.color}30`} 
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* Full Screen Single Map Mode */
+              <MapPanel {...sharedMapProps!} />
+            )}
+          </div>
+
+          {/* Bottom telemetry metric bar */}
+          {tel && (
+            <BottomMetrics
+              vehA={tel.veh_a}
+              vehB={tel.veh_b}
+              vehC={tel.veh_c}
+              vehD={tel.veh_d}
+              activeAlgos={activeAlgos}
+              hungarianResult={tel.last_hungarian_result}
+              mciMode={tel.mci_mode}
+              mciGreedyTotal={tel.mci_greedy_total}
+              mciHungarianTotal={tel.mci_hungarian_total}
+              savingsPct={tel.last_hungarian_result?.savings_pct}
+            />
+          )}
+
+          {/* Map Legend (drawn inside the map viewport for reference) */}
+          {tel && !splitView && (
+            <div style={{ position: "absolute", bottom: 14, left: 14, zIndex: 200 }}>
+              <div style={glass({ padding: "10px 14px", borderRadius: 10, display: "flex", flexDirection: "column", gap: 6 })}>
+                <span style={{ fontSize: 9, fontWeight: 800, color: "#334155", textTransform: "uppercase", letterSpacing: ".1em" }}>LEGEND</span>
+                {[
+                  { el: <div style={{ width: 18, height: 2.5, background: "#3b82f6", borderRadius: 2 }}/>, label: "Dijkstra (Static)" },
+                  { el: <div style={{ width: 18, height: 2.5, background: "#22c55e", borderRadius: 2 }}/>, label: "A* Path (Dynamic)" },
+                  { el: <div style={{ width: 18, height: 2.5, borderBottom: "2px dashed #f97316", borderRadius: 1 }}/>, label: "Greedy BFS (Dynamic)" },
+                  { el: <div style={{ width: 18, height: 2.5, borderBottom: "2px dotted #a855f7", borderRadius: 1 }}/>, label: "Bellman-Ford (Static)" },
+                  { el: <div style={{ width: 12, height: 12, border: "2px solid #06b6d4", borderRadius: 3, background: "rgba(6,182,212,.12)"}}/>, label: "Hospital" },
+                  { el: <div style={{ width: 11, height: 11, borderRadius: "50%", background: "#ef4444" }}/>, label: "Emergency" },
+                  { el: <div style={{ width: 12, height: 12, border: "2px solid #a78bfa", borderRadius: 3, background: "rgba(167,139,250,.12)"}}/>, label: "Ambulance Station" },
+                ].map(({ el, label }) => (
+                  <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {el}
+                    <span style={{ fontSize: 10, color: "#94a3b8", fontWeight: 500 }}>{label}</span>
+                  </div>
                 ))}
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* ════════ TOAST ALERT ════════ */}
+      {/* ─── 3. OVERLAYS, TOASTS & DIALOG MODALS ─── */}
+      {/* Toast popup notifications */}
       {alert && (
         <div style={{
-          position:"absolute", top:14, left:"50%", transform:"translateX(-50%)",
-          zIndex:300, ...glass({ padding:"12px 20px", borderLeft:"4px solid #ef4444",
-          display:"flex", alignItems:"center", gap:10, borderRadius:12 })
+          position: "absolute", top: 66, left: "50%", transform: "translateX(-50%)",
+          zIndex: 500, ...glass({ padding: "12px 20px", borderLeft: "4px solid #ef4444",
+          display: "flex", alignItems: "center", gap: 10, borderRadius: 12 })
         }}>
-          <p style={{ margin:0, fontSize:12, fontWeight:700, color:"#f1f5f9" }}>{alert}</p>
+          <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: "#f1f5f9" }}>{alert}</p>
         </div>
       )}
 
-      {/* ════════ BOTTOM COMPARISON BAR (only in full view) ════════ */}
-      {tel && isSimActive && !splitView && (
-        <BottomMetrics
-          vehA={tel.veh_a}
-          vehB={tel.veh_b}
-          vehC={tel.veh_c}
-          vehD={tel.veh_d}
-          activeAlgos={activeAlgos}
-        />
-      )}
-
-      {/* ════════ LEGEND (hidden in split view to reduce clutter) ════════ */}
-      {!splitView && (
-        <div style={{ position:"absolute", bottom:14, left:14, zIndex:200 }}>
-          <div style={glass({ padding:"10px 14px", borderRadius:10,
-                               display:"flex", flexDirection:"column", gap:6 })}>
-            <span style={{ fontSize:9, fontWeight:800, color:"#334155",
-                           textTransform:"uppercase", letterSpacing:".1em" }}>LEGEND</span>
-            {[
-              { el:<div style={{ width:18, height:2.5, background:"#3b82f6", borderRadius:2 }}/>, label:"Dijkstra route (Static)" },
-              { el:<div style={{ width:18, height:2.5, background:"#22c55e", borderRadius:2 }}/>, label:"A* route (Dynamic)" },
-              { el:<div style={{ width:18, height:2.5, borderBottom:"2px dashed #f97316", borderRadius:1 }}/>, label:"Greedy BFS (Dynamic)" },
-              { el:<div style={{ width:18, height:2.5, borderBottom:"2px dotted #a855f7", borderRadius:1 }}/>, label:"Bellman-Ford (Static)" },
-              { el:<div style={{ width:12, height:12, border:"2px solid #06b6d4", borderRadius:3, background:"rgba(6,182,212,.12)"}}/>, label:"Hospital" },
-              { el:<div style={{ width:11, height:11, borderRadius:"50%", background:"#ef4444" }}/>, label:"Emergency" },
-              { el:<div style={{ width:12, height:12, border:"2px solid #a78bfa", borderRadius:3, background:"rgba(167,139,250,.12)"}}/>, label:"Amb. Station" },
-            ].map(({ el, label }) => (
-              <div key={label} style={{ display:"flex", alignItems:"center", gap:8 }}>
-                {el}
-                <span style={{ fontSize:10, color:"#94a3b8", fontWeight:500 }}>{label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ════════ RESULT MODAL ════════ */}
+      {/* Leaderboard/Result popup card */}
       <ResultModal
         isOpen={isResultOpen}
         vehA={tel ? tel.veh_a : null}
@@ -736,32 +815,44 @@ export default function App() {
         vehD={tel ? tel.veh_d : null}
         activeAlgos={activeAlgos}
         onClose={handleReset}
+        isMCI={isMCI}
+        mciGreedyTotal={tel?.mci_greedy_total}
+        mciHungarianTotal={tel?.mci_hungarian_total}
+        savingsPct={tel?.last_hungarian_result?.savings_pct}
       />
 
-      {/* ════════ HUNGARIAN OPTIMIZER MODAL ════════ */}
-      {showHungarian && hungarianResult && (
+      {/* Hungarian Assignment Analysis panel */}
+      {showHungarian && tel?.last_hungarian_result && (
         <HungarianPanel
-          result={hungarianResult}
+          result={tel.last_hungarian_result}
           onClose={() => setShowHungarian(false)}
         />
       )}
 
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } } * { box-sizing: border-box; }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse {
+          0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+          70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        * { box-sizing: border-box; }
+      `}</style>
     </div>
   );
 }
 
 const btnPrimary: React.CSSProperties = {
-  padding:"9px 18px", background:"#22c55e", color:"#fff", fontWeight:800,
-  fontSize:12, borderRadius:10, border:"none", cursor:"pointer",
-  letterSpacing:".05em", textTransform:"uppercase",
-  boxShadow:"0 0 18px rgba(34,197,94,.35)",
+  padding: "9px 18px", background: "#22c55e", color: "#fff", fontWeight: 800,
+  fontSize: 12, borderRadius: 10, border: "none", cursor: "pointer",
+  letterSpacing: ".05em", textTransform: "uppercase",
+  boxShadow: "0 0 18px rgba(34,197,94,.35)",
 };
 
 const btnSecondary: React.CSSProperties = {
-  padding:"9px 14px", background:"rgba(255,255,255,.07)", color:"#94a3b8",
-  fontWeight:800, fontSize:12, borderRadius:10, border:"none", cursor:"pointer",
-  letterSpacing:".05em", textTransform:"uppercase",
+  padding: "9px 14px", background: "rgba(255,255,255,.07)", color: "#94a3b8",
+  fontWeight: 800, fontSize: 12, borderRadius: 10, border: "none", cursor: "pointer",
+  letterSpacing: ".05em", textTransform: "uppercase",
 };
 
 const getGridStyle = (count: number): React.CSSProperties => {
@@ -788,7 +879,6 @@ const getGridStyle = (count: number): React.CSSProperties => {
       overflow: "hidden",
     };
   }
-  // 4 — 2×2 grid, rows MUST be constrained with minmax(0,1fr)
   return {
     display: "grid",
     gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",

@@ -68,6 +68,22 @@ export interface GlobalStats {
   resolved_count: number;
   avg_response_time: number;
   history: number[];
+  hospital_overflow_count?: number;
+}
+
+export interface MCIVehicle {
+  id: string;
+  color: string;
+  start_node: string;
+  target_node: string;
+  path: string[];
+  x: number;
+  y: number;
+  angle: number;
+  accumulated_cost: number;
+  segment_index: number;
+  segment_progress: number;
+  status: "RESPONDING" | "ARRIVED";
 }
 
 export interface TelemetryPayload {
@@ -83,6 +99,14 @@ export interface TelemetryPayload {
   global_stats: GlobalStats;
   speed_multiplier: number;
   is_paused: boolean;
+  last_hungarian_result?: HungarianResult | null;
+  disaster_mode?: boolean;
+  mci_mode?: boolean;
+  mci_emergencies?: string[];
+  mci_greedy_vehicles?: MCIVehicle[];
+  mci_hungarian_vehicles?: MCIVehicle[];
+  mci_greedy_total?: number;
+  mci_hungarian_total?: number;
 }
 
 export interface TrafficAlert {

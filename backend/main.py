@@ -47,6 +47,10 @@ class PauseRequest(BaseModel):
 class SpeedRequest(BaseModel):
     speed: float
 
+class BedsUpdateRequest(BaseModel):
+    id: str
+    beds: int
+
 # Broadcast helper
 async def broadcast_telemetry():
     if not active_connections:
@@ -66,7 +70,7 @@ async def broadcast_telemetry():
 async def simulation_tick_loop():
     while True:
         try:
-            if not simulation.is_paused and simulation.active_emergency:
+            if not simulation.is_paused and (simulation.active_emergency or simulation.mci_mode):
                 # 0.1s tick representing 100ms real travel time progression
                 simulation.tick(tick_duration=0.1)
             await broadcast_telemetry()
@@ -141,6 +145,16 @@ async def set_speed(req: SpeedRequest):
         return {"status": "success", "data": simulation.get_telemetry()}
     return {"status": "error", "message": "Invalid speed multiplier. Choose 1.0, 2.0, or 4.0"}
 
+@app.post("/api/hospitals/beds")
+async def update_hospital_beds(req: BedsUpdateRequest):
+    for h in simulation.hospitals:
+        if h["id"] == req.id:
+            h["beds"] = req.beds
+            simulation.add_log("HOSPITAL", f"🏥 {h['name']} capacity updated manually to {req.beds}/14.")
+            await broadcast_telemetry()
+            return {"status": "success", "data": simulation.get_telemetry()}
+    return {"status": "error", "message": f"Hospital ID {req.id} not found."}
+
 import random
 
 @app.post("/api/traffic/congestion")
@@ -179,6 +193,12 @@ async def trigger_clear_traffic():
     await broadcast_telemetry()
     return {"status": "success", "data": simulation.get_telemetry()}
 
+@app.post("/api/traffic/disaster")
+async def trigger_disaster_mode():
+    simulation.trigger_disaster_mode()
+    await broadcast_telemetry()
+    return {"status": "success", "data": simulation.get_telemetry()}
+
 # ── DEMO MODE ──────────────────────────────────────────────────────────────
 @app.post("/api/demo")
 async def run_demo():
@@ -200,6 +220,7 @@ async def run_demo():
     """
     from graph import generate_city_graph, update_edge_weights as uew
     import random
+    random.seed(42)
 
     W, H = simulation.width, simulation.height
 
@@ -304,6 +325,111 @@ async def run_demo():
         return {"status": "success", "node": em_node, "data": simulation.get_telemetry()}
     return {"status": "error", "message": "Demo setup failed — restart server"}
 
+@app.post("/api/demo/open-city")
+async def run_demo_open_city():
+    from graph import generate_city_graph, update_edge_weights
+    import random
+    random.seed(100)
+    simulation.reset_map()
+    W, H = simulation.width, simulation.height
+    simulation.graph = generate_city_graph(width=W, height=H, expressway_prob=0.0)
+    for u, v, d in simulation.graph.edges(data=True):
+        d["traffic_factor"] = 1.0
+    update_edge_weights(simulation.graph)
+    
+    simulation.hospitals = [
+        {"id": "H1", "node": (8, 1), "beds": 12, "specialty": "General", "name": "City General Clinic"}
+    ]
+    simulation.ambulances = [
+        {"id": "AMB-1", "current_node": (8, 8), "available": True, "type": "ALS"},
+        {"id": "AMB-2", "current_node": (0, H-1), "available": False, "type": "BLS"},
+        {"id": "AMB-3", "current_node": (W-1, 0), "available": False, "type": "ALS"},
+        {"id": "AMB-4", "current_node": (W-1, H-1), "available": False, "type": "BLS"},
+    ]
+    
+    simulation.logs = [{"time": "DEMO", "msg": "🎯 Scenario: Open City. Greedy BFS finds goal directly!"}]
+    em_node = "1,1"
+    simulation.trigger_emergency(em_node, "Normal", "General")
+    await broadcast_telemetry()
+    return {"status": "success", "data": simulation.get_telemetry()}
+
+@app.post("/api/demo/heuristic")
+async def run_demo_heuristic():
+    return await run_demo()
+
+@app.post("/api/demo/rerouting")
+async def run_demo_rerouting():
+    from graph import generate_city_graph, update_edge_weights
+    import random
+    random.seed(200)
+    simulation.reset_map()
+    W, H = simulation.width, simulation.height
+    simulation.graph = generate_city_graph(width=W, height=H, expressway_prob=0.1)
+    
+    for u, v, d in simulation.graph.edges(data=True):
+        d["traffic_factor"] = round(random.uniform(1.0, 1.3), 2)
+    update_edge_weights(simulation.graph)
+    
+    simulation.ambulances = [
+        {"id": "AMB-1", "current_node": (0, 0), "available": True, "type": "ALS"},
+        {"id": "AMB-2", "current_node": (0, H-1), "available": False, "type": "BLS"},
+        {"id": "AMB-3", "current_node": (W-1, 0), "available": False, "type": "ALS"},
+        {"id": "AMB-4", "current_node": (W-1, H-1), "available": False, "type": "BLS"},
+    ]
+    simulation.hospitals = [
+        {"id": "H1", "node": (1, 1), "beds": 12, "specialty": "General", "name": "City General Clinic"}
+    ]
+    
+    simulation.logs = [{"time": "DEMO", "msg": "🎯 Scenario: Rerouting. A roadblock will block roads mid-transit!"}]
+    em_node = f"{W-3},{H-3}"
+    simulation.trigger_emergency(em_node, "Normal", "General")
+    await broadcast_telemetry()
+    return {"status": "success", "data": simulation.get_telemetry()}
+
+@app.post("/api/demo/maze")
+async def run_demo_maze():
+    from graph import generate_city_graph, update_edge_weights
+    import random
+    random.seed(300)
+    simulation.reset_map()
+    W, H = simulation.width, simulation.height
+    simulation.graph = generate_city_graph(width=W, height=H, expressway_prob=0.0)
+    
+    # Block interior corridors to create a maze
+    for u, v, d in list(simulation.graph.edges(data=True)):
+        xu, yu = u
+        xv, yv = v
+        if yu == yv:
+            # Block rows at y=2,4,6 except for vertical gaps
+            if yu in (2, 4, 6):
+                gap_x = 1 if yu == 2 else 7 if yu == 4 else 3
+                x_avg = (xu + xv) / 2
+                if not (gap_x - 0.5 <= x_avg <= gap_x + 0.5):
+                    d["traffic_factor"] = float("inf")
+        else:
+            d["traffic_factor"] = 1.2
+            
+    update_edge_weights(simulation.graph)
+    
+    simulation.hospitals = [
+        {"id": "H1", "node": (1, 1), "beds": 12, "specialty": "General", "name": "City Central Clinic"}
+    ]
+    simulation.ambulances = [
+        {"id": "AMB-1", "current_node": (W-2, H-2), "available": True, "type": "ALS"}
+    ]
+    
+    simulation.logs = [{"time": "DEMO", "msg": "🎯 Scenario: Dense Maze. Greedy BFS gets trapped in dead ends!"}]
+    em_node = "1,1"
+    simulation.trigger_emergency(em_node, "Normal", "General")
+    await broadcast_telemetry()
+    return {"status": "success", "data": simulation.get_telemetry()}
+
+@app.post("/api/demo/mci")
+async def run_demo_mci():
+    simulation.trigger_mci()
+    await broadcast_telemetry()
+    return {"status": "success", "data": simulation.get_telemetry()}
+
 
 @app.post("/api/demo/block")
 async def demo_block_dijkstra():
@@ -387,6 +513,8 @@ async def run_hungarian_demo():
         emergencies = [{"node": node} for node in em_nodes]
         
         res = build_dispatch_comparison(simulation.ambulances, emergencies, simulation.graph)
+        simulation.last_hungarian_result = res
+        await broadcast_telemetry()
         return {"status": "success", "data": res}
     except Exception as e:
         import traceback; traceback.print_exc()

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { GraphData, VehicleTelemetry, Hospital, ActiveEmergency, Ambulance } from "../types";
+import { GraphData, VehicleTelemetry, Hospital, ActiveEmergency, Ambulance, MCIVehicle } from "../types";
 
 interface MapPanelProps {
   graph:          GraphData;
@@ -14,12 +14,18 @@ interface MapPanelProps {
   onNodeClick:    (nodeId: string) => void;
   step:           string;
   activeAlgos:    Set<string>;
+  disasterMode?:  boolean;
+  mciMode?:       boolean;
+  mciEmergencies?: string[];
+  mciGreedyVehicles?: MCIVehicle[];
+  mciHungarianVehicles?: MCIVehicle[];
 }
 
 export const MapPanel: React.FC<MapPanelProps> = ({
   graph, vehA, vehB, vehC, vehD, hospitals, ambulances,
   emergency, selectedHospId, onNodeClick, step,
-  activeAlgos
+  activeAlgos, disasterMode, mciMode, mciEmergencies,
+  mciGreedyVehicles, mciHungarianVehicles
 }) => {
   const showA = activeAlgos.has("A");
   const showB = activeAlgos.has("B");
@@ -95,6 +101,17 @@ export const MapPanel: React.FC<MapPanelProps> = ({
       return `${px(+a)},${py(+b)}`;
     }).join(" ");
   };
+
+  const mciPts = (path: string[] | null): string | null => {
+    if (!path || path.length < 2) return null;
+    return path.map(s => {
+      const [a, b] = s.split(",");
+      return `${px(+a)},${py(+b)}`;
+    }).join(" ");
+  };
+
+  const showMCIGreedy = mciMode ? (!activeAlgos.has("B") || activeAlgos.has("C") || activeAlgos.has("A")) : false;
+  const showMCIHungarian = mciMode ? (!activeAlgos.has("C") || activeAlgos.has("B") || activeAlgos.has("D")) : false;
 
   const canClick = step === "STANDBY" || step === "COMPUTING";
 
@@ -210,6 +227,36 @@ export const MapPanel: React.FC<MapPanelProps> = ({
             </g>
           ); })()}
 
+          {/* MCI Greedy Paths (Blue / Dashed) */}
+          {showMCIGreedy && mciGreedyVehicles && mciGreedyVehicles.map((veh, idx) => {
+            const p = mciPts(veh.path);
+            if (!p || veh.status === "ARRIVED") return null;
+            return (
+              <g key={`mci-g-path-${idx}`} filter="url(#glow-blue)">
+                <polyline points={p} fill="none" stroke="#3b82f6" strokeWidth="6"
+                  strokeLinecap="round" strokeLinejoin="round" opacity=".12"/>
+                <polyline points={p} fill="none" stroke="#3b82f6" strokeWidth="2"
+                  strokeLinecap="round" strokeLinejoin="round" opacity=".85"
+                  strokeDasharray="6,4" className="dgo"/>
+              </g>
+            );
+          })}
+
+          {/* MCI Hungarian Paths (Red / Solid) */}
+          {showMCIHungarian && mciHungarianVehicles && mciHungarianVehicles.map((veh, idx) => {
+            const p = mciPts(veh.path);
+            if (!p || veh.status === "ARRIVED") return null;
+            return (
+              <g key={`mci-h-path-${idx}`} filter="url(#glow-red)">
+                <polyline points={p} fill="none" stroke="#ef4444" strokeWidth="6"
+                  strokeLinecap="round" strokeLinejoin="round" opacity=".12"/>
+                <polyline points={p} fill="none" stroke="#ef4444" strokeWidth="2.2"
+                  strokeLinecap="round" strokeLinejoin="round" opacity=".85"
+                  className="dgo"/>
+              </g>
+            );
+          })}
+
           {/* ── LAYER 3: NODES (intersections) ── */}
           {graph.nodes.map(node => {
             const cx = px(node.x), cy = py(node.y);
@@ -317,6 +364,59 @@ export const MapPanel: React.FC<MapPanelProps> = ({
             );
           })()}
 
+          {/* MCI Emergencies */}
+          {mciMode && mciEmergencies && mciEmergencies.map((emNode, idx) => {
+            const [ex, ey] = emNode.split(",").map(Number);
+            const cx = px(ex), cy = py(ey);
+            return (
+              <g key={`mci-em-marker-${idx}`} filter="url(#glow-red)">
+                <circle cx={cx} cy={cy} r="8" fill="none" stroke="#ef4444" strokeWidth="2" className="rp1"/>
+                <circle cx={cx} cy={cy} r="8" fill="none" stroke="#ef4444" strokeWidth="2" className="rp2"/>
+                <circle cx={cx} cy={cy} r="9"  fill="#ef4444" opacity=".18"/>
+                <circle cx={cx} cy={cy} r="7"  fill="#ef4444" opacity=".95"/>
+                <circle cx={cx} cy={cy} r="3"  fill="#fff"/>
+                <text x={cx} y={cy+18} fill="#fca5a5" fontSize="8" fontWeight="800"
+                  textAnchor="middle" fontFamily="Inter,sans-serif">P{idx + 1}</text>
+              </g>
+            );
+          })}
+
+          {/* MCI Greedy Vehicles */}
+          {showMCIGreedy && mciGreedyVehicles && mciGreedyVehicles.map((veh, idx) => {
+            if (veh.status === "ARRIVED") return null;
+            const cx = px(veh.x), cy = py(veh.y);
+            return (
+              <g key={`mci-g-veh-${idx}`} transform={`translate(${cx},${cy}) rotate(${veh.angle})`}>
+                <ellipse cx="0" cy="4" rx="14" ry="5" fill="rgba(0,0,0,.4)"/>
+                <rect x="-14" y="-8" width="28" height="16" rx="4"
+                  fill="url(#ambGrad)" stroke="#3b82f6" strokeWidth="2.5" strokeDasharray="3,2"/>
+                <rect x="-5" y="-12" width="10" height="4" rx="2" fill="#3b82f6" className="blk"/>
+                <line x1="-5" y1="0" x2="5" y2="0" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round"/>
+                <line x1="0" y1="-4" x2="0" y2="5" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round"/>
+                <text x="0" y="-20" fill="#93c5fd" fontSize="7.5" fontWeight="800"
+                  textAnchor="middle" fontFamily="Inter,sans-serif">{veh.id.replace(" (Greedy)", "").replace("AMB-", "G-")}</text>
+              </g>
+            );
+          })}
+
+          {/* MCI Hungarian Vehicles */}
+          {showMCIHungarian && mciHungarianVehicles && mciHungarianVehicles.map((veh, idx) => {
+            if (veh.status === "ARRIVED") return null;
+            const cx = px(veh.x), cy = py(veh.y);
+            return (
+              <g key={`mci-h-veh-${idx}`} transform={`translate(${cx},${cy}) rotate(${veh.angle})`}>
+                <ellipse cx="0" cy="4" rx="14" ry="5" fill="rgba(0,0,0,.4)"/>
+                <rect x="-14" y="-8" width="28" height="16" rx="4"
+                  fill="url(#ambGrad)" stroke="#ef4444" strokeWidth="2.5"/>
+                <rect x="-5" y="-12" width="10" height="4" rx="2" fill="#ef4444" className="blk"/>
+                <line x1="-5" y1="0" x2="5" y2="0" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round"/>
+                <line x1="0" y1="-4" x2="0" y2="5" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round"/>
+                <text x="0" y="-20" fill="#fca5a5" fontSize="7.5" fontWeight="800"
+                  textAnchor="middle" fontFamily="Inter,sans-serif">{veh.id.replace(" (Hungarian)", "").replace("AMB-", "H-")}</text>
+              </g>
+            );
+          })}
+
           {/* ── LAYER 7: ANIMATED AMBULANCES ── */}
           {/* Dijkstra — Blue */}
           {showA && vehA && vehA.status !== "ARRIVED" && (() => {
@@ -388,6 +488,23 @@ export const MapPanel: React.FC<MapPanelProps> = ({
 
         </g>{/* end transform group */}
       </svg>
+
+      {/* ── Disaster mode banner ── */}
+      {disasterMode && (
+        <div style={{
+          position:"absolute", top:16, left:"50%", transform:"translateX(-50%)",
+          background:"rgba(239,68,68,.16)", border:"1px solid rgba(239,68,68,.4)",
+          borderRadius:10, padding:"8px 24px",
+          fontSize:13, fontWeight:900, color:"#ef4444",
+          pointerEvents:"none",
+          backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)",
+          boxShadow: "0 0 20px rgba(239,68,68,0.25)",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+        }}>
+          ⚠️ Disaster Mode Active: Major Routes Blocked! 💥
+        </div>
+      )}
 
       {/* ── Hint banner ── */}
       {canClick && (
